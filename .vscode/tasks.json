@@ -1,0 +1,18 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "evalTask",
+            "type": "shell",
+            // "command": "c:/Users/Linus/anaconda3/envs/Master/python.exe C:/Users/Linus/Desktop/Master/CodeBase/PSZS/Baseline/eval.py Datasets/CompCars -cf config.json -cp latest -kod -t wTot -b 16 --metrics acc@5 f1@5 --in-dir C:/Users/Linus/Desktop/te/SplitRawShared/Baseline_resnet50/Unseeded/2024-05-02-15_24_15",
+            "command": "C:/Users/Linus/Desktop/Master/CodeBase/PSZS/Baseline/runconfigs/eval.bat",
+        },
+        {
+            "label": "multipleTask",
+            "type": "shell",
+            "command": "C:/Users/Linus/Desktop/Master/CodeBase/PSZS/Baseline/runconfigs/configs.bat",
+        }
+    ]
+}

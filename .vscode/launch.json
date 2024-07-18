@@ -1,0 +1,136 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "RunTask",
+      "type":"node",
+      "request": "launch",
+      "preLaunchTask": "multipleTask",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Eval",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+    //   "args": "Datasets/CompCars -c best -d CompCarsModel -t svNov --num-classes 281 -m resnet50 --metrics acc@5 f1@5 --timm-chk tv2_in1k -b 8 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -cf config.json -cp latest -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 f1@5 --in-dir C:/Users/Linus/Desktop/te/SplitRawShared/Baseline_resnet50/Unseeded/2024-05-02-15_24_15"
+      // "args": "Datasets/CompCars -cf configSimple.json -cp simple -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 --in-dir checkpoints"
+      // "args": "Datasets/CompCars -cf configMaksed.json -cp masked -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 f1@5 --in-dir checkpoints"
+      // "args": "Datasets/CompCars -cf configSeparated.json -cp separated -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 f1@5 --in-dir checkpoints"
+      // "args": "Datasets/CompCars -cf config.json -cp best -kod -b 16 --in-dir logs/Experimental/erm_ResNet_MaskedClassifier_SimpleHead_0_292bea78"
+      // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp d4093a09 --seed 2 --ds-split 2 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
+      // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp 06436424 --seed 2 --ds-split 3 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
+      // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp 0339dc2b --seed 2 --ds-split 1 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
+      // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp d4093a09 --seed 0 --ds-split 2 --eval-groups target full -kod -b 16 --in-dir C:/Users/Linus/Desktop/noCheck/baseline2/New"
+      "args": "Datasets/CompCars --checkpoint-dir checkpoints -cf config.json -cp best --eval-groups target full -kod -b 16 --in-dir C:/Users/Linus/Desktop/noCheck/checkpoints/baseline2/AllModels"
+    },
+    {
+      "name": "ModeMappingTest",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      // "args": "Datasets/CompCars 2 --seed 0"
+      "args": "Datasets/CompCars 2_Original --seed 0 --map-modes pred targetIndex name"
+      // "args": "Datasets/CompCars 2_Original --descriptor shared --num-classes 225 --map-modes pred targetIndex name --seed 0"
+      // "args": "Datasets/CompCars 2 --seed 0 --multiple"
+    },
+    {
+      "name": "Generaltest",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      // "justMyCode": false,
+      "args": "--max-steps 100"
+      // "args": "--max-steps 100 --strategies step"
+    },
+    {
+      "name": "ConfMatTest",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      // "args": "Datasets/CompCars 2 --seed 0"
+      "args": "Datasets/CompCars 2 --seed 0 --display-names"
+    },
+    {
+      "name": "Baseline",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      // "justMyCode": false,
+      "env": { "PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "6" },
+      /*----------Base----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      
+      
+      /*----------Base(Hierarchy)----------*/
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=weighted hierarchy_accum_weights=[0.5,0.5] --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=weighted hierarchy_accum_weights=[0.2,0.8] --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=step --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=step intial_coarse_weight=0.8 --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=step --optim-kwargs max_mixing_epochs=5 --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+
+      /*----------DANN----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --method dann --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --method dann --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+
+      /*----------PAN----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --method pan --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // Around 2GB
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hidden-size=512 --bottleneck-dim 256 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hidden-size=512 --bottleneck-dim 256 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --optim-kwargs entropy_loss-weights=[0.001,0.01] --model-kwargs hidden-size=512 --bottleneck-dim 256 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --optim-kwargs entropy_loss-weights=[0.001,0.01] --model-kwargs label_smooth_strategy=s hidden-size=512 --bottleneck-dim 256 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // Around 6GB
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hidden-size=512 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // Around 3.5GB
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --bottleneck-dim 512 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // Around 6GB
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --bottleneck-dim 1024 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // Around 3.5GB
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hidden-size=512 --bottleneck-dim 1024 --method pan --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+
+      /*----------UJDA----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --method ujda --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 -i 300 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --method ujda --classification-type MaskedClassifier --head-type HierarchicalHead -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      
+
+
+      /*----------MCC----------*/
+      "args": "Datasets/CompCars -d CompCarsModel --method mcc --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+
+
+      
+      /*----------JAN----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --method jan --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --method jan --model-kwargs adversarial=True --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --method jan --model-kwargs linear=True --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --method jan --model-kwargs adversarial=True linear=True --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --method jan --optim-kwargs adaptation_filter_mode=shared --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --method jan --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --method jan --model-kwargs adversarial=True --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 --seed 0 --log logs/CompCarsModel"
+      
+      // "args": "Datasets/CompCars -d CompCarsModel -s wTot -ts svShr -tn svNov --model-kwargs logit_loss_func=entropy --optim-kwargs logit_loss_weight=1e-4 feature-loss-weight=3e-3 --classification-type MaskedClassifier --ds-split 2 --eval-train -b 16 -i 400 --epochs 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel -s wTot -ts svShr -tn svNov --model-kwargs logit_loss_func=entropy logit_accum_func=sum --optim-kwargs logit_loss_weight=1e-4 feature-loss-weight=3e-3 --classification-type MaskedClassifier --ds-split 2 --eval-train -b 16 -i 400 --epochs 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel -s wTot -ts svShr -tn svNov --model-kwargs logit_loss_func=accum --optim-kwargs logit_loss_weight=1e-4 feature-loss-weight=3e-3 --classification-type MaskedClassifier --ds-split 2 --eval-train -b 16 -i 400 --epochs 2 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel -s wTot -ts svShr -tn svNov --model-kwargs logit_loss_func=accum logit_accum_func=avg --optim-kwargs logit_loss_weight=1e-4 feature-loss-weight=3e-3 --classification-type MaskedClassifier --ds-split 2 --eval-train -b 16 -i 400 --epochs 2 --seed 0 --log logs/CompCarsModel"
+
+
+      // "args": "Datasets/CompCars -d CompCarsHierarchy -s wTot -ts svShr -tn svNov --method dann --head-type HierarchicalHead -m resnet50 --timm-chk tv2_in1k -b 8 -i 200 --epochs 3 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --classifier-kwargs share_coarse_heads=False hierarchy_levels=2 head_depth=2 --head-type HierarchicalHead --classification-type SeparatedClassifier -s wTot -ts svShr -tn svNov -m resnet50 --timm-chk tv2_in1k -b 8 -i 200 --epochs 3 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --classifier-kwargs hierarchy_levels=2 --head-type HierarchicalHead --classification-type SeparatedClassifier -s wTot -ts svShr -tn svNov -m resnet50 --timm-chk tv2_in1k -b 8 -i 200 --epochs 3 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsHierarchy --classifier-kwargs hierarchy_levels=2 --classification-type SeparatedClassifier -s wTot -ts svShr -tn svNov -m resnet50 --timm-chk tv2_in1k -b 8 -i 200 --epochs 3 --log logs/CompCarsModel"
+    }
+  ]
+}
