@@ -13,9 +13,9 @@ from timm.data.loader import PrefetchLoader
 from PSZS.Models import CustomModel
 from PSZS.Utils.utils import NativeScalerMultiple
 from PSZS.Utils.dataloader import ForeverDataIterator
-from PSZS.Utils.meters import StatsMeter, ProgressMeter, _BaseMeter
-from PSZS.Utils.evaluation import PrecisionRecallF1, accuracy
-from PSZS.datasets import transform_target
+from PSZS.Utils.meters import StatsMeter, ProgressMeter, _BaseMeter, DynamicStatsMeter
+from PSZS.Utils.evaluation import PrecisionRecallF1, accuracy, accuracy_hierachy
+from PSZS.datasets import transform_target, DatasetDescriptor
 from PSZS.Utils.io import Logger
 from PSZS.Metrics import ConfusionMatrix
 
@@ -34,9 +34,9 @@ class Validator():
                  amp_autocast = suppress,
                  result_suffix: Optional[str] = None,
                  create_report: bool = False,
+                 hierarchy_level_names: Optional[Sequence[str]] = None,
                  **confmat_params,
                  ):
-        self._create_meters()
         self.model = model
         self.model.eval() # For Validation the model should always be in eval mode
         self.device = device
@@ -49,10 +49,18 @@ class Validator():
         self.amp_autocast = amp_autocast
         self.dataloader = dataloader
         # Assume that the dataset is ConcatDataset and thus has a descriptor attribute
-        self.dataset_descriptor = getattr(self.dataloader.dataset, 'descriptor', None)
+        self.dataset_descriptor : DatasetDescriptor = getattr(self.dataloader.dataset, 'descriptor', None)
         # For hierarchical heads the load data function already reduces the labels to the main class
         # so no need to check for it/handle differently
         self.hierarchy_level = getattr(self.dataloader.dataset, 'main_class_index', -1)
+        if hierarchy_level_names is None:
+            self.hierarchy_level_names = self.dataset_descriptor.hierarchy_level_names
+        else:
+            assert len(hierarchy_level_names) == len(self.dataset_descriptor.hierarchy_level_names), \
+                f"Hierarchy level names ({len(hierarchy_level_names)}) must match the number of hierarchy levels in the dataset descriptor ({len(self.dataset_descriptor.hierarchy_level_names)})."
+            self.hierarchy_level_names = hierarchy_level_names
+        self.main_metric_field = self.hierarchy_level_names[self.hierarchy_level]
+        self._create_meters()
         self.metrics = metrics
         # self.metric_meters is already set via metrics setter and filtered to only contain supported metrics
         if len(self.metric_meters) == 0:
@@ -71,6 +79,7 @@ class Validator():
         self.result_suffix = "" if result_suffix is None else result_suffix
         self.create_report = create_report
         self.confmat_params = confmat_params
+        
     
     @property
     def reduced_confmat_params(self) -> dict:
@@ -163,10 +172,10 @@ class Validator():
     
     @property
     def cls_acc_1(self) -> float:
-        return self._meter_cls_acc_1.get_avg()   
+        return self._meter_cls_acc_1.get_avg(self.main_metric_field)   
     @property
     def cls_acc_5(self) -> float:
-        return self._meter_cls_acc_5.get_avg() 
+        return self._meter_cls_acc_5.get_avg(self.main_metric_field) 
     @property
     def precision(self) -> float:
         return self._meter_precision.get_last() 
@@ -183,10 +192,11 @@ class Validator():
     @property
     def metric_dict(self) -> OrderedDict[str, float]:
         metrics = OrderedDict()
-        if 'acc@1' in self.metrics:
-            metrics.update([('Acc@1', self._meter_cls_acc_1.get_avg())])
-        if 'acc@5' in self.metrics:
-            metrics.update([('Acc@5', self._meter_cls_acc_5.get_avg())])
+        for lvl in self.hierarchy_level_names:
+            if 'acc@1' in self.metrics:
+                metrics[f'Acc@1_{lvl}'] = self._meter_cls_acc_1.get_avg(lvl)
+            if 'acc@5' in self.metrics:
+                metrics[f'Acc@5_{lvl}'] = self._meter_cls_acc_5.get_avg(lvl)
         if 'precision' in self.metrics:
             metrics.update([('Precision', self._meter_precision.get_last())])
         if 'recall' in self.metrics:
@@ -207,8 +217,15 @@ class Validator():
         self.batch_time = StatsMeter.get_stats_meter_time('Batch Time', ':5.2f')
         
         # Metric meters are handeled via property getter only returning relevant meters
-        self._meter_cls_acc_1 = StatsMeter.get_stats_meter_min_max('Acc@1', ':3.2f')
-        self._meter_cls_acc_5 = StatsMeter.get_stats_meter_min_max('Acc@5', ':3.2f')
+        # self._meter_cls_acc_1 = StatsMeter.get_stats_meter_min_max('Acc@1', ':3.2f')
+        # self._meter_cls_acc_5 = StatsMeter.get_stats_meter_min_max('Acc@5', ':3.2f')
+        # Overwrite accuracy meters to show all hierarchy levels
+        self._meter_cls_acc_1 = DynamicStatsMeter.get_stats_meter_min_max("Acc@1", 
+                                                                fields=self.hierarchy_level_names, 
+                                                                fmt=":3.2f")
+        self._meter_cls_acc_5 = DynamicStatsMeter.get_stats_meter_min_max("Acc@5", 
+                                                                fields=self.hierarchy_level_names, 
+                                                                fmt=":3.2f")
         self._meter_precision = StatsMeter.get_average_meter('Precision', ':3.2f', include_last=True)
         self._meter_recall = StatsMeter.get_average_meter('Recall', ':3.2f', include_last=True)
         self._meter_f1 = StatsMeter.get_average_meter('F1', ':3.2f', include_last=True)
@@ -265,11 +282,14 @@ class Validator():
                         og_labels: torch.Tensor,
                         ) -> None:
         self.confusion_matrix.update(target=target, prediction=pred)
+        cls_accs, num_relevant = accuracy_hierachy(prediction=pred, 
+                                                   target=target, 
+                                                   hierarchy_map=self.dataset_descriptor.pred_fine_coarse_map,
+                                                   originalTarget=og_labels,
+                                                   evalClasses=self.eval_classes)
+        cls_acc_1, cls_acc_5 = zip(*cls_accs)
         
-        (cls_acc_1, cls_acc_5), num_relevant = accuracy(prediction=pred, 
-                                                        target=target,
-                                                        originalTarget=og_labels, 
-                                                        evalClasses=self.eval_classes)
+        
         self.PrecRecF1.update(prediction=pred, 
                               target=target,)
         prec, recall, f1 = self.PrecRecF1.compute()
@@ -280,8 +300,8 @@ class Validator():
         f1_1, f1_5 = f1
             
         # Only account for relevant samples when accuracy updating meters
-        self._meter_cls_acc_1.update(cls_acc_1.item(), num_relevant)
-        self._meter_cls_acc_5.update(cls_acc_5.item(), num_relevant)
+        self._meter_cls_acc_1.update(vals=cls_acc_1, n=num_relevant)
+        self._meter_cls_acc_5.update(vals=cls_acc_5, n=num_relevant)
         # For precision, recall and f1 all samples are relevant
         self._meter_precision.update(prec_1.item(), self.batch_size)
         self._meter_recall.update(recall_1.item(), self.batch_size)

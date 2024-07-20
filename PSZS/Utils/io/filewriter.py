@@ -239,7 +239,7 @@ def export_reduced_conf(reduced_data: np.ndarray,
                         filename: str ='reduced_confusion_matrix.xlsx',
                         sheet_name: Optional[str] = None):
     # Set default sheet name
-    if sheet_name is None:
+    if sheet_name is None or sheet_name == '':
         sheet_name = 'Reduced Confusion Matrix'
     
     # Check if wb exists and set sheet

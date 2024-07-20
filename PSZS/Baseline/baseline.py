@@ -21,17 +21,18 @@ from PSZS.Models import *
 from PSZS.Validator.Validator import Validator
 from PSZS.datasets import build_remapped_descriptors
 import PSZS.Utils.utils as utils
+from PSZS.AWS import setup_aws, handle_aws_postprocessing
 
 def main(args):
+    setup_success, ec2_client, s3_client = setup_aws(args)
+    if setup_success==False:
+        warnings.warn("AWS setup failed. Exiting.")
+        return
     exp_name = filewriter.get_experiment_name_v2(args=args)
     logger = Logger(root=args.log, exp_name=exp_name, sep_chk=args.separate_checkpoint)
     args.uuid = logger.out_dir.split("_")[-1]
     
     device = utils.setup_device(args)
-    # if args.device == 'cuda' and not torch.cuda.is_available():
-    #     warnings.warn('CUDA is not available, using CPU.')
-    #     args.device = 'cpu'
-    # device = torch.device(args.device)
     # Optimizer gets created in model
     print(f"Using optimizer: {args.opt}")   
     # LR Scheduler gets created in model
@@ -95,7 +96,9 @@ def main(args):
     bs = (bs_source, bs_target)
     
     # Construct and remap dataset descriptors
-    total_descriptor, shared_descriptor, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, ds_split=args.ds_split)
+    total_descriptor, shared_descriptor, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, 
+                                                                                       ds_split=args.ds_split,
+                                                                                       level_names=['make', 'model'])
     
     eval_classes = list(novel_descriptor.targetIDs[-1])
     
@@ -210,6 +213,7 @@ def main(args):
                         print_freq=args.print_freq,
                         loss_scaler=loss_scaler,
                         amp_autocast=amp_autocast,
+                        create_report=args.create_report,
                         **args.confmat_kwargs)
     runner.result_suffix = 'Target'
     test_metrics = runner.run("Target")
@@ -238,6 +242,7 @@ def main(args):
     print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}")
     print(f'Total time: {time.time() - start_time}')
     logger.close()
+    handle_aws_postprocessing(args, s3_client=s3_client, ec2_client=ec2_client)
         
 
 if __name__ == '__main__':
@@ -391,6 +396,26 @@ if __name__ == '__main__':
                        choices=['bfloat16', 'float16'],
                        help='lower precision AMP dtype (default: float16)')
     
+    # AWS 
+    group = parser.add_argument_group('AWS Parameters')
+    group.add_argument('--aws', action='store_true',
+                        help='Use AWS to run the model.')
+    group.add_argument('--stop-instance', action='store_true',
+                        help='Try to stop the instance after training if no other job is running.')
+    group.add_argument('--force_stop', action='store_true',
+                        help='Force the stopping of the instance regardless of other jobs.')
+    group.add_argument('--aws-config', type=str, default='aws_config.json',
+                        help='AWS configuration file for default S3, Dataset EBS volume, '
+                        'and other aws config information.')
+    group.add_argument('--s3-bucket', type=str, default=None,
+                        help='S3 bucket to store results and checkpoints. '
+                        'If not specified use value from aws_config file.')
+    group.add_argument('--dataset-volume-id', type=str, default=None,
+                        help='Volume ID of the dataset EBS volume. '
+                        'If not specified use home directory of ec2 instance.')
+    group.add_argument('--store-local', action='store_true',
+                        help='Store results and checkpoints locally instead of on S3 bucket.')
+    
     
     # Optimizer parameters
     group = parser.add_argument_group('Training Parameters')
@@ -475,6 +500,8 @@ if __name__ == '__main__':
                         help='Create an excel in addition to the csv file with the results (only at end).')
     group.add_argument("--create-class-summary", action='store_true',
                         help='Save class summary tracking class wise metrics for each epoch.')
+    group.add_argument("--create-report", action='store_true',
+                        help='Save final report as a .html file.')
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
     if args_config.config:

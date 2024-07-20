@@ -24,11 +24,11 @@
       // "args": "Datasets/CompCars -cf configMaksed.json -cp masked -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 f1@5 --in-dir checkpoints"
       // "args": "Datasets/CompCars -cf configSeparated.json -cp separated -kod -t wTot --num-classes 281 -b 16 --metrics acc@5 f1@5 --in-dir checkpoints"
       // "args": "Datasets/CompCars -cf config.json -cp best -kod -b 16 --in-dir logs/Experimental/erm_ResNet_MaskedClassifier_SimpleHead_0_292bea78"
-      // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp d4093a09 --seed 2 --ds-split 2 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
+      "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp d4093a09 --seed 2 --ds-split 2 --eval-groups novel target -kod -b 8 --in-dir checkpoints/ResNet/Masked"
       // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp 06436424 --seed 2 --ds-split 3 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
       // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp 0339dc2b --seed 2 --ds-split 1 --eval-groups target full -kod -b 16 --in-dir checkpoints/ResNet/Masked"
       // "args": "Datasets/CompCars --checkpoint-dir None -cf config.json -cp d4093a09 --seed 0 --ds-split 2 --eval-groups target full -kod -b 16 --in-dir C:/Users/Linus/Desktop/noCheck/baseline2/New"
-      "args": "Datasets/CompCars --checkpoint-dir checkpoints -cf config.json -cp best --eval-groups target full -kod -b 16 --in-dir C:/Users/Linus/Desktop/noCheck/checkpoints/baseline2/AllModels"
+      // "args": "Datasets/CompCars --checkpoint-dir checkpoints -cf config.json -cp best --eval-groups target full -kod -b 16 --in-dir C:/Users/Linus/Desktop/noCheck/checkpoints/baseline2/AllModels"
     },
     {
       "name": "ModeMappingTest",
@@ -72,7 +72,23 @@
       "env": { "PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "6" },
       /*----------Base----------*/
       // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 -i 400 --epochs 2 --seed 0 --log logs/CompCarsModel"
       
+      /*----------Base(Modified splits)----------*/
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2I -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2IK -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2R -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2RF -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2S -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 3I -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 3IK -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier --create-report -s wTot -ts svShr -tn svNov --ds-split 3R -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier --create-report -s wTot -ts svShr -tn svNov --ds-split 3RF -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --classification-type MaskedClassifier --create-report -s wTot -ts svShr -tn svNov --ds-split 3S -b 16 --epochs 1 --seed 0 --log logs/CompCarsModel"
+      
+
+
       
       /*----------Base(Hierarchy)----------*/
       // "args": "Datasets/CompCars -d CompCarsHierarchy --model-kwargs hierarchy_accum_func=weighted hierarchy_accum_weights=[0.5,0.5] --head-type HierarchicalHead --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
@@ -108,7 +124,7 @@
 
 
       /*----------MCC----------*/
-      "args": "Datasets/CompCars -d CompCarsModel --method mcc --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
+      // "args": "Datasets/CompCars -d CompCarsModel --method mcc --classification-type MaskedClassifier -s wTot -ts svShr -tn svNov --ds-split 2 -b 16 --seed 0 --log logs/CompCarsModel"
 
 
       

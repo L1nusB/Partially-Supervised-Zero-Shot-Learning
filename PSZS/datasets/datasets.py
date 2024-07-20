@@ -99,7 +99,8 @@ def get_dataset(dataset_name: str,
     return ConcatDataset([dataset(task=task, descriptor=descriptor, **filtered_kwargs) for task in tasks])
 
 def build_remapped_descriptors(fileRoot: str | PathLike[str],
-                               ds_split: Optional[str|int]=None
+                               ds_split: Optional[str|int]=None,
+                               level_names: Optional[Sequence[str]] = None,
                                ) -> Tuple[DatasetDescriptor, DatasetDescriptor, DatasetDescriptor]:
     """Builds the remapped dataset descriptors for the given dataset split consisting of total, shared and novel descriptors.
     The shared descriptor is not modified while the novel descriptor is remapped by applying an offset to the models
@@ -128,15 +129,19 @@ def build_remapped_descriptors(fileRoot: str | PathLike[str],
     if ds_split is not None:
         split_subpath += f'_Split{ds_split}'
         
-    total_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_total.txt")
-    shared_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_shared.txt")
-    novel_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_novel.txt")
+    total_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_total.txt", 
+                                         level_names=level_names)
+    shared_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_shared.txt", 
+                                          level_names=level_names)
+    novel_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_novel.txt", 
+                                         level_names=level_names)
     
     # For makes a uniform offset can not be applied as they are partially shared 
     # between shared and novel
     # For models use num_classes of shared as offset as these are exclusive 
     # between shared and novel
     novel_descriptor.offset = [0, shared_descriptor.num_classes[1]]
+    
     # Reindex the makes such that the shared makes are first
     # i.e. truly novel makes start at the end of the shared makes
     new_make_idx = shared_descriptor.num_classes[0]

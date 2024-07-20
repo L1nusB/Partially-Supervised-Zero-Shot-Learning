@@ -13,3 +13,8 @@ openpyxl
 typeguard
 seaborn
 pycm
+boto3
+requests
+boto3-stubs
+boto3-stubs[essential]
+psutil

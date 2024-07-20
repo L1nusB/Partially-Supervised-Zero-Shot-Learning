@@ -1,5 +1,5 @@
 
-from typing import Iterable, List, Tuple, Optional, Sequence, overload
+from typing import Dict, Iterable, List, Tuple, Optional, Sequence, overload
 import warnings
 
 import numpy as np
@@ -164,9 +164,86 @@ def accuracy(prediction: torch.Tensor,
             relevantTargetMask = torch.tensor([i in evalClasses for i in originalTarget])
         # Required to only account for relevant classes when building statistics
         num_relevant = relevantTargetMask.sum().item()
+        # If no relevant classes are present return 100% accuracy
+        # and avoid division by zero causing NaN
+        if num_relevant == 0:
+            return [torch.tensor(1)]*len(topk), 0
         correct = pred.eq(target.reshape(1, -1).expand_as(pred))
         relevant_correct = correct[:,relevantTargetMask]
         return [relevant_correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / num_relevant for k in topk], num_relevant
+
+@torch.no_grad()
+def accuracy_hierachy(prediction: torch.Tensor, 
+                      target: torch.Tensor, 
+                      hierarchy_map: Sequence[Dict[int, int]],
+                      topk: Sequence[int]=(1,5), 
+                      originalTarget: Optional[torch.Tensor]=None,
+                      evalClasses: Optional[Sequence[int]] = None
+                      ) -> Tuple[List[List[torch.Tensor]], int]:
+    """Computes the prediction accuracy over the specified topk values for each level of the hierarchy.
+    The `target` is mapped using the `hierarchy_map` and the accuracy is computed for the `topk` values.
+    Via `evalClasses` only a subset of classes can be evaluated. Using `originalTarget`
+    the original class labels can be specified which are referenced in `evalClasses`.
+    This is relevant if `target` does not correspond to the original class labels 
+    e.g. if the target indices are a (remapped) subset of the original classes and thus are not a 
+    continuous range that could cause wrong classes to be evaluated.
+    The number of relevant classes that were used for computing the accuracy is returned.
+
+    Args:
+        prediction (torch.Tensor): 
+            Logit predictions of the model. Shape: (N, num_classes)
+        target (torch.Tensor): 
+            Ground truth target labels/indices based on num_classes of the model. Shape: (N,)
+        hierarchy_map (Sequence[Dict[int, int]]):
+            List of dictionaries that map the target classes (and predictions) to the hierarchy levels.
+        topk (Sequence[int], optional): 
+            Values to compute the accuracy over. Defaults to (1,5).
+        originalTarget (Optional[Sequence[int]], optional): 
+            Ground truth target labels based on the original dataset/annfile. Shape: (N,). Defaults to None.
+        evalClasses (Optional[Sequence[int]], optional): 
+            Target classes to be evaluated over. Should correspond to the indices in `target` or 
+             classes from `originalTarget`. Defaults to None.
+
+    Returns:
+        Tuple[List[List[torch.Tensor]], int]: 
+            List of accuracy values for each topk value of each hierarchy level and the number of relevant classes.
+             The first list corresponds to the hierarchy levels while the second list corresponds to the topk values.
+    """
+    accs = []
+    for lvl_map in hierarchy_map:
+        mapped_target = torch.tensor([lvl_map[t.item()] for t in target], dtype=target.dtype, device=target.device)
+        maxk = min(max(topk), prediction.size()[1])
+        _, pred = prediction.topk(maxk, 1, True, True)
+        mapped_pred = torch.tensor([lvl_map[p.item()] for p in pred.flatten()], dtype=pred.dtype, device=pred.device).reshape(pred.size())
+        mapped_pred = mapped_pred.t()
+        if evalClasses is None:
+            # If no classes are specified all classes are evaluated
+            # then originalClasses is irrelevant
+            relevantTargetMask = torch.ones_like(target, dtype=bool)
+        else:
+            if originalTarget is None:
+                warnings.warn('originalTarget is not specified when evalClasses given. '
+                              'Use target directly instead. '
+                              'This can cause unexpected results if target index does not '
+                              'correspond to the original class index.')
+                originalTarget = target
+            relevantTargetMask = torch.tensor([i in evalClasses for i in originalTarget])
+        # Required to only account for relevant classes when building statistics
+        num_relevant = relevantTargetMask.sum().item()
+        # If no relevant classes are present return 100% accuracy
+        # and avoid division by zero causing NaN
+        if num_relevant == 0:
+            accs.append([torch.tensor(1)]*len(topk))
+            continue
+        correct = mapped_pred.eq(mapped_target.reshape(1, -1).expand_as(mapped_pred))
+        relevant_correct = correct[:,relevantTargetMask]
+        # acc = [relevant_correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / num_relevant for k in topk]
+        # Need to clamp values of each prediction to 1 to avoid multiple correct predictions being counted
+        # possible for lower hierarchy levels (e.g. multiple models of the same make)
+        acc = [relevant_correct[:min(k, maxk)].float().sum(0).clamp(max=1).sum() * 100. / num_relevant for k in topk]
+        accs.append(acc)
+    return accs, num_relevant
+        
 
 class PrecisionRecallF1:
     def __init__(self, 

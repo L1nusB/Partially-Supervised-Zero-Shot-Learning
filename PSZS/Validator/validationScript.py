@@ -76,7 +76,9 @@ def main(args):
         args.resize_size = data_config['input_size'][-1]
     
     # Construct and remap dataset descriptors
-    total_descriptor, _, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, ds_split=args.ds_split)
+    total_descriptor, _, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, 
+                                                                       ds_split=args.ds_split,
+                                                                       level_names=['make', 'model'])
     
     eval_classes = list(novel_descriptor.targetIDs[-1])    
         
@@ -150,7 +152,7 @@ def main(args):
     # First test_loader object is constructed on only novel set
     if 'novel' in args.eval_groups or 'all' in args.eval_groups:
         print("Validation on only novel set")
-        runner.report_suffix = 'Novel'
+        runner.result_suffix = 'Novel'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel', 
                                                 metrics=metrics, 
@@ -170,7 +172,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'Shared'
+        runner.result_suffix = 'Shared'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
                                                 metrics=metrics, 
@@ -190,7 +192,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'Target'
+        runner.result_suffix = 'Target'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
                                                 metrics=metrics, 
@@ -210,7 +212,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'Source'
+        runner.result_suffix = 'Source'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
                                                 metrics=metrics, 
@@ -230,7 +232,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'NovelSource'
+        runner.result_suffix = 'NovelSource'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
                                                 metrics=metrics, 
@@ -250,7 +252,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'SharedSource'
+        runner.result_suffix = 'SharedSource'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
                                                 metrics=metrics, 
@@ -270,7 +272,7 @@ def main(args):
                                                         device=device,
                                                         descriptor=total_descriptor,) 
         runner.dataloader = test_loader
-        runner.report_suffix = 'All'
+        runner.result_suffix = 'All'
         metrics = runner.run()
         csv_summary = filewriter.update_summary(epoch='Test Novel+Shared+Source', 
                                                 metrics=metrics, 

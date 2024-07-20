@@ -7,9 +7,8 @@ Datasets/*
 checkpoints/*
 *.html
 *.xlsx
-PSZS/runconfigs/done/*
-examples/*
 PSZS/runconfigs/*
+examples/*
 
 */CompCars/sv_data/
 */CompCars/data/

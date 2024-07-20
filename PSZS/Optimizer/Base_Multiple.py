@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from PSZS.Utils.meters import DynamicStatsMeter, ProgressMeter, _BaseMeter
 from PSZS.Utils.dataloader import ForeverDataIterator
-from PSZS.Utils.evaluation import accuracy
+from PSZS.Utils.evaluation import accuracy, accuracy_hierachy
 from PSZS.Optimizer.Base_Optimizer import Base_Optimizer, TRAIN_PRED_TYPE, LABEL_TYPE, PRED_TYPE
 from PSZS.Models import CustomModel
 from PSZS.Utils.evaluation import PrecisionRecallF1
@@ -31,6 +31,7 @@ class Base_Multiple(Base_Optimizer):
                  iter_names: Optional[Sequence[str]]=None,
                  **optim_kwargs,
                  ) -> None:
+        # TODO Use datasetdescriptor.hierarchy_level_names instead
         self.hierachy_level_names = ['make', 'model']
         
         if iter_names:
@@ -101,6 +102,7 @@ class Base_Multiple(Base_Optimizer):
         # as this corresponds to the source domain which should match the validation
         self.hierarchy_level_val: int | None = getattr(self.val_loader.dataset, 'main_class_index', self.hierarchy_levels[0])
         self.shared_classes: List[int] = self._get_shared_classes()
+        self.main_metric_field = self.hierachy_level_names[self.hierarchy_level_val]
         
         # Typehint correctly for intellisense
         self.train_batch_sizes: List[int]
@@ -176,6 +178,14 @@ class Base_Multiple(Base_Optimizer):
             if 'recall' in self.eval_metrics:
                 meters.append(self.meter_recall_train)
             return meters
+        
+        # Overwrite accuracy meters to show all hierarchy levels
+        self.meter_cls_acc_1 = DynamicStatsMeter.get_stats_meter_min_max("Acc@1", 
+                                                                fields=self.hierachy_level_names, 
+                                                                fmt=":3.2f")
+        self.meter_cls_acc_5 = DynamicStatsMeter.get_stats_meter_min_max("Acc@5", 
+                                                                fields=self.hierachy_level_names, 
+                                                                fmt=":3.2f")
         
         metric_meters_train = _get_metric_meters_train()
         metric_meters_val = self._get_metric_meters()
@@ -590,20 +600,23 @@ class Base_Multiple(Base_Optimizer):
                                   features: Optional[torch.Tensor]=None,
                                   ) -> None:
         self.confusion_matrix.update(prediction=pred, target=target)
-        # original_label_indices = self._map_labels(labels=og_labels, mode='pred', train=False)
-        
-        (cls_acc_1, cls_acc_5), num_relevant = accuracy(prediction=pred, 
-                                                        target=target, 
-                                                        originalTarget=og_labels,
-                                                        evalClasses=self.eval_classes)
+        cls_accs, num_relevant = accuracy_hierachy(prediction=pred, 
+                                                   target=target, 
+                                                   hierarchy_map=self.val_descriptor.pred_fine_coarse_map,
+                                                   originalTarget=og_labels,
+                                                   evalClasses=self.eval_classes)
+        cls_acc_1, cls_acc_5 = zip(*cls_accs)
+
         self.PrecRecF1_val.update(prediction=pred, 
                                   target=target,)
         prec, recall, f1 = self.PrecRecF1_val.compute()
         
         update_size = pred.size(0)
         # Only account for relevant samples when accuracy updating meters
-        self.meter_cls_acc_1.update(cls_acc_1.item(), num_relevant)
-        self.meter_cls_acc_5.update(cls_acc_5.item(), num_relevant)
+        self.meter_cls_acc_1.update(vals=cls_acc_1, n=num_relevant)
+        # self.meter_cls_acc_1.update(cls_acc_1.item(), num_relevant)
+        self.meter_cls_acc_5.update(vals=cls_acc_5, n=num_relevant)
+        # self.meter_cls_acc_5.update(cls_acc_5.item(), num_relevant)
         # For precision, recall and f1 all samples are relevant
         self.meter_precision.update(prec.item(), update_size)
         self.meter_recall.update(recall.item(), update_size)
@@ -614,8 +627,8 @@ class Base_Multiple(Base_Optimizer):
     def _set_eval_results(self) -> None:
         """Stores the current evaluation metrics (based on meters)
         in the class variables."""
-        self.cls_acc_1 = self.meter_cls_acc_1.get_avg()
-        self.cls_acc_5 = self.meter_cls_acc_5.get_avg()
+        self.cls_acc_1 = self.meter_cls_acc_1.get_avg(self.main_metric_field)
+        self.cls_acc_5 = self.meter_cls_acc_5.get_avg(self.main_metric_field)
         self.precision = self.meter_precision.get_last()
         self.recall = self.meter_recall.get_last()
         self.f1 = self.meter_f1.get_last()
@@ -624,9 +637,10 @@ class Base_Multiple(Base_Optimizer):
         """Gets the current evaluation metrics for all `self.eval_metrics` 
         from the respective internal class variables.
         `~_set_eval_results` needs to be called before to set these values."""
-        results = OrderedDict([('Acc@1', self.cls_acc_1), ('F1', self.f1)])
+        results = OrderedDict([(f'Acc@1_{lvl}', self.meter_cls_acc_1.get_avg(lvl)) for lvl in self.hierachy_level_names])
+        results.update([('F1', self.f1)])
         if 'acc@5' in self.eval_metrics:
-            results.update([('Acc@5', self.cls_acc_5)])
+            results.update([(f'Acc@5_{lvl}', self.meter_cls_acc_5.get_avg(lvl)) for lvl in self.hierachy_level_names])
         if 'precision' in self.eval_metrics:
             results.update([('Precision', self.precision)])
         if 'recall' in self.eval_metrics:

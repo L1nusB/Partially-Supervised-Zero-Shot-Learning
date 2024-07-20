@@ -6,6 +6,7 @@ from contextlib import suppress
 from functools import partial
 import os.path as osp
 import os
+import psutil
 from typing import Optional, Sequence, Tuple
 import argparse
 import ast
@@ -204,3 +205,23 @@ def display_images(images: Sequence[torch.Tensor],
         plt.savefig(save_filepath)
     else:
         plt.show()
+
+def is_other_sh_scripts_running():
+    current_pid = os.getpid()
+    current_script = os.path.basename(__file__)
+    
+    for process in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            # Process info
+            pid = process.info['pid']
+            cmdline = process.info['cmdline']
+            
+            # Check if the process is a shell script and not the current script
+            if pid != current_pid and cmdline and (cmdline[0] == 'sh' or cmdline[-1].endswith('.sh')):
+                script_name = os.path.basename(cmdline[-1])
+                if script_name != current_script:
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    return False

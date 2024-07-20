@@ -406,6 +406,8 @@ class DynamicStatsMeter(_BaseMeter):
                 return val.item()
             elif isinstance(val, np.ndarray):
                 return val.item()
+            else:
+                return float(val)
         else:
             warnings.warn('avg is not a watched specifier for this meter.')
             return 0

@@ -70,10 +70,13 @@ class DatasetDescriptor:
     # The lists are ordered by the prediction index i.e. the first class corresponds to the first prediction node etc.
     classes : List[List[str]] = [[]]
     
+    hierarchy_level_names: List[str] = []
+    
     def __init__(self, 
                  filePath: str,
                  hierarchy_levels: Optional[int] = None,
                  offset: Optional[List[int]] = None,
+                 level_names: Optional[List[str]] = None,
                  ) -> None:
         data = self.parse_data_file(filePath)
         
@@ -81,6 +84,11 @@ class DatasetDescriptor:
             hierarchy_levels = len(data[0][0])
         if offset is None:
             offset = [0]*hierarchy_levels
+        if level_names is None:
+            self.hierarchy_level_names = [f"Level {i}" for i in range(hierarchy_levels)]
+        else:
+            assert len(level_names) == hierarchy_levels, f"Number of level names ({len(level_names)}) must match hierarchy levels ({hierarchy_levels})."
+            self.hierarchy_level_names = level_names
             
         self.hierarchy_levels = hierarchy_levels
         self.offset = offset
