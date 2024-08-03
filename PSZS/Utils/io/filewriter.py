@@ -33,13 +33,17 @@ MODEL_ABBREVIATIONS = {
     'swinv2_large': 'SwinV2Large',
     'swinv2': 'SwinV2',
     'swin': 'Swin',
+    'convnext_base': 'ConvNextBase',
+    'convnext': 'ConvNext',
 }
 
-def get_experiment_name_v2(args : Namespace) -> str:
+def get_experiment_name_v2(args : Namespace,
+                           prefix: Optional[str] = None) -> str:
     backbone = [v for k,v in MODEL_ABBREVIATIONS.items() if args.model.lower().startswith(k.lower())]
     # Use first matching abbreviation (highest granularity)
     backbone = backbone[0] if len(backbone) > 0 else args.model
-    return _get_experiment_name_v2(method=args.method, 
+    return _get_experiment_name_v2(name=prefix,
+                                   method=args.method, 
                                    backbone=backbone, 
                                    classifier=args.classification_type, 
                                    head=args.head_type, 

@@ -1,9 +1,8 @@
 from typing import Callable, Dict, List, Optional, Tuple, Any
 
-from ._CompCarsClasses import *
-from .CompCars import CompCars, DatasetDescriptor
+from .CUB import CUB, DatasetDescriptor
 
-class CompCarsModel(CompCars):
+class CUBSpecies(CUB):
     multi_label = False
     def __init__(self, 
                  root: str, 
@@ -16,7 +15,7 @@ class CompCarsModel(CompCars):
                  annfile_dir: str = 'annfiles',
                  phase: Optional[str] = None,
                  ) -> None:
-        super(CompCarsModel, self).__init__(root=root, 
+        super(CUBSpecies, self).__init__(root=root, 
                                             task=task, 
                                             main_class_idx=main_class_idx, 
                                             split=split, 
@@ -26,11 +25,6 @@ class CompCarsModel(CompCars):
                                             annfile_dir=annfile_dir,
                                             phase=phase,
                                             )
-        # # Only keep the main class
-        # self.class_idx_name_maps = self.class_idx_name_maps[self.main_class_idx]
-        # self.class_pred_idx_maps = self.class_pred_idx_maps[self.main_class_idx]
-        # self.true_class_to_idx_maps = self.true_class_to_idx_maps[self.main_class_idx]
-        # self.classes = self.classes[self.main_class_idx]
         
     @property
     def id_to_name(self) -> Dict[int, str]:

@@ -1,3 +1,6 @@
+TYPE_CLASSES_SV_WEB = ['MPV','SUV','sedan','hatchback','minibus','fastback','estate','pickup',
+                       'hardtop_convertible','sports','crossover','convertible',]
+
 # List of all make classes in CompCars Web (subsumes sv)
 MAKE_CLASSES_SV_WEB = ['Jeep','Yiqi','Mitsubishi','Shangqidatong','Dongfengfengdu','Dongfengfengshen','Zhonghua','Toyota',
                     'Wuling','Zoyte','Porsche','Chrysler','Cadillac','Buck','Lifan','Huatai','Shuanghuan','Shuanglong',

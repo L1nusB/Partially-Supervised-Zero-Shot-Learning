@@ -1,3 +1,4 @@
+from numbers import Number
 from typing import Optional, Sequence, Any
 import numpy as np
 import warnings
@@ -177,7 +178,7 @@ class StatsMeter(_BaseMeter):
     def reset_batch(self) -> None:
         self.batch = 0
 
-    def update(self, val, n=1) -> None:
+    def update(self, val: Number, n=1) -> None:
         # If n is 0 do nothing
         if n == 0:
             return

@@ -16,24 +16,24 @@ class CustomClassifier(nn.Module):
                  in_features: int,
                  head_type: Type[CustomHead] = SimpleHead,
                  auto_split: bool = True,
-                 auto_split_indices: Optional[Sequence[int]] = None,
+                 auto_split_indices: Optional[int | Sequence[int]] = None,
                  test_head_pred_idx: Optional[int] = None,
                  num_classes_pref: str = 'inputs',
                  head_params: dict = {},
                  ) -> None:
         """
         Args:
-        num_classes (int | np.ndarray): Number of classes for each head. Gets expanded/must match shape (num_inputs, num_head_predictions).
-        num_inputs (int): Number of inputs to the classifier during training forward pass.
-        in_features (int): Number of features before the head layer produces by the backbone.
-        head_type (Type[CustomHead]): Type of head to use. (default: ``SimpleHead``)
-        auto_split (bool): Whether to automatically split the incoming features into num_inputs parts. (default: True)
-        auto_split_indices (Optional[Sequence[int]]): Indices to split the features when auto_split is True
-        num_classes_pref (str): Whether given num_classes represent values for each input or each head prediction. \
-            Only relevant if num_classes has len(shape)=1 and num_inputs==in_features. Either 'inputs' or 'heads' (default: 'inputs')
-        test_head_pred_idx (Optional[int]): Index of the prediction the head produce to use for testing/validation. \
-                                            Must be provided when Head returns multiple outputs. (default: None)
-        head_params (dict): Keyword arguments for the head
+            num_classes (int | np.ndarray): Number of classes for each head. Gets expanded/must match shape (num_inputs, num_head_predictions).
+            num_inputs (int): Number of inputs to the classifier during training forward pass.
+            in_features (int): Number of features before the head layer produces by the backbone.
+            head_type (Type[CustomHead]): Type of head to use. (default: ``SimpleHead``)
+            auto_split (bool): Whether to automatically split the incoming features into num_inputs parts. (default: True)
+            auto_split_indices (Optional[Sequence[int]]): Indices to split the features when auto_split is True
+            num_classes_pref (str): Whether given num_classes represent values for each input or each head prediction. \
+                Only relevant if num_classes has len(shape)=1 and num_inputs==in_features. Either 'inputs' or 'heads' (default: 'inputs')
+            test_head_pred_idx (Optional[int]): Index of the prediction the head produce to use for testing/validation. \
+                                                Must be provided when Head returns multiple outputs. (default: None)
+            head_params (dict): Keyword arguments for the head
         
         """
         super(CustomClassifier, self).__init__()
@@ -122,6 +122,8 @@ class CustomClassifier(nn.Module):
                 print(f"No auto_split_indices provided. Splitting evenly into {len(self.num_classes)} parts.")
                 self.auto_split_indices = len(self.num_classes)
             else:
+                if isinstance(auto_split_indices, int):
+                    auto_split_indices = [auto_split_indices]
                 assert len(auto_split_indices) == len(self.num_classes)-1, (f"Number of auto_split_indices ({len(self.auto_split_indices)}) "
                                                                     f"must be equal to number of classes-1 ({len(self.num_classes)-1})")
                 self.auto_split_indices = auto_split_indices

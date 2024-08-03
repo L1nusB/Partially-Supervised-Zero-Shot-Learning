@@ -31,8 +31,10 @@ class Base_Multiple(Base_Optimizer):
                  iter_names: Optional[Sequence[str]]=None,
                  **optim_kwargs,
                  ) -> None:
-        # TODO Use datasetdescriptor.hierarchy_level_names instead
-        self.hierachy_level_names = ['make', 'model']
+        if getattr(val_loader.dataset, 'descriptor', None) is not None:
+            self.hierachy_level_names = val_loader.dataset.descriptor.hierarchy_level_names
+        else:
+            self.hierachy_level_names = [f'Level{i+1}' for i in range(model.classifier.num_head_pred)]
         
         if iter_names:
             assert len(iter_names)==len(train_iters), \
@@ -107,6 +109,7 @@ class Base_Multiple(Base_Optimizer):
         # Typehint correctly for intellisense
         self.train_batch_sizes: List[int]
         self.hierarchy_levels : List[int | None]
+        self.train_iters : List[ForeverDataIterator]
         # Avoid checks on every data load call
         if self.send_to_device:
             self._load_data = self._load_data_send_to_device

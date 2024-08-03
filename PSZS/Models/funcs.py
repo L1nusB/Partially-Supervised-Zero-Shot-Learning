@@ -5,43 +5,77 @@ from typing import Callable, Sequence, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-def construct_weights(weights: Sequence[float], length: Optional[int] = None) -> torch.Tensor:
+def construct_weights(weights: Sequence[float], 
+                      length: Optional[int] = None, 
+                      normalized: bool = True,
+                      same_weight: bool = False,
+                      default_weight: float = 0.1) -> torch.Tensor:
         """
-        Create a weight vector with specified ratios for the initial components
-        and the remaining components summing to 1 minus the sum of the given ratios.
+        Create a weight vector based on the specified ratios. 
+        Weight components are set to the given ratios and remaining components are filled with appropriate values.
+        Additional components can be specified by either setting `length` to a value greater than the number of ratios
+        or by setting `normalized` to False and have `sum(weights)` less than 1 in which case one additional component is added.
+        Additional components are added in the front of the final weights to represent coarse to fine weight components.
+        If `normalized` is True, the weights are normalized/constructed to sum to 1 with equal weight being distributed to the remaining components.
+        Otherwise new weights are set to `default_weight`.
         
         Parameters:
-            weights (Sequence[float]): The values for the initial components.
-            length (int, optional): The total length of the weight vector. If None, the length will bethe length of ratios plus the components to sum to 1.
+            weights (Sequence[float]): 
+                The values for the initial components.
+            length (int, optional): 
+                The total length of the weight vector. If `None`, the length will be the length of ratios if `normalize` is `False` or `weights`
+                sum up to 1. If `normalized` is `True` and the sum of weights is less than 1, the length will be the length of ratios + 1.
+            normalized (bool): 
+                Normalize the weights to sum to 1 and other constraints. Defaults to True.
+            same_weight (bool):
+                Set all remaining additional components to the same value. Otherwise scale by depth of component. Defaults to False.
+            default_weight (float): 
+                The default weight value to use for unspecified components if `normalized` is False.
         
         Returns:
             torch.Tensor: A weight vector with the specified weights.
         """
-        if any(w < 0 or w > 1 for w in weights):
-            raise ValueError("All weights must be between 0 and 1.")
-        if sum(weights) > 1:
-            raise ValueError("Sum of weights must not exceed 1.")
+        if normalized:
+            if any(w < 0 or w > 1 for w in weights):
+                raise ValueError("All weights must be between 0 and 1.")
+            if sum(weights) > 1:
+                raise ValueError(f"Sum of weights must not exceed 1. Got {sum(weights)}")
         
         num_weights = len(weights)
         if length is None:
-            length = num_weights + 1
+            # If normalized ensure weights can be expanded to 1 by adding one more component
+            if normalized and sum(weights) < 1:
+                length = num_weights + 1
+            else:
+                # Either normalized=False or sum(weights) == 1
+                length = num_weights
         if length < num_weights:
-            raise ValueError("Length of the vector must be at least the number of ratios.")
+            raise ValueError(f"Length/Number of weights {(length)} be at least the number of ratios {(num_weights)}.")
         
         # Create the weight vector
         weight_vector = torch.zeros(length)
         
-        # Set the initial components to the given ratios
+        # Set the 'final' components to the given ratios
         for i, ratio in enumerate(weights):
-            weight_vector[i] = ratio
-        
-        # Distribute the remaining weight evenly
-        remaining_weight = 1 - sum(weights)
+            weight_vector[length - num_weights + i] = ratio
         remaining_length = length - num_weights
-        if remaining_length > 0:
-            weight_vector[num_weights:] = remaining_weight / remaining_length
+        if normalized:
+            # Distribute the remaining weight evenly
+            # remaining_weight = round((1 - sum(weights)) / remaining_length, 4)
+            remaining_weight = round((1 - sum(weights)) / remaining_length, 4)
+            # When using normalized weights special scaling is needed
+            for i in range(remaining_length):
+                # Scale reminaining weight by index if same_weight is False
+                weight_vector[i] = remaining_weight if same_weight else remaining_weight * (i*2+1) / remaining_length
+        else:
+            remaining_weight = default_weight
+            # When using default weight directly scale it up by index
+            for i in range(remaining_length):
+                weight_vector[i] = remaining_weight if same_weight else remaining_weight*(i+1)
         
-        assert sum(weight_vector) == 1, f"Sum of weight vector is not 1: {sum(weight_vector)}"
+        
+        if normalized:
+            assert math.isclose(sum(weight_vector), 1), f"Sum of weight vector is not 1: {sum(weight_vector)}"
         return weight_vector
 
 ### Accumulate functions ###

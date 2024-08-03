@@ -78,19 +78,25 @@ class DatasetDescriptor:
                  offset: Optional[List[int]] = None,
                  level_names: Optional[List[str]] = None,
                  ) -> None:
+        self.default_names = True
         data = self.parse_data_file(filePath)
         
         if hierarchy_levels is None:
             hierarchy_levels = len(data[0][0])
+        # Needs to be set before setting level_names as property references it
+        self.hierarchy_levels = hierarchy_levels
+        
         if offset is None:
             offset = [0]*hierarchy_levels
         if level_names is None:
-            self.hierarchy_level_names = [f"Level {i}" for i in range(hierarchy_levels)]
+            # Directly set private variable to avoid property setter
+            # that sets default_names to False
+            self._hierarchy_level_names = [f"Level {i}" for i in range(hierarchy_levels)]
         else:
             assert len(level_names) == hierarchy_levels, f"Number of level names ({len(level_names)}) must match hierarchy levels ({hierarchy_levels})."
+            # Use property setter to set default_names to False
             self.hierarchy_level_names = level_names
             
-        self.hierarchy_levels = hierarchy_levels
         self.offset = offset
         self.coarse_fine_map = [{indices[i]:indices[-1] for indices, _ in data} for i in range(hierarchy_levels)]
         self.fine_coarse_map = [{indices[-1]:indices[i] for indices, _ in data} for i in range(hierarchy_levels)]
@@ -193,6 +199,22 @@ class DatasetDescriptor:
     def classes(self, value: List[List[str]]) -> None:
         self._classes = value
         
+    @property
+    def hierarchy_level_names(self) -> List[str]:
+        return self._hierarchy_level_names
+    @hierarchy_level_names.setter
+    def hierarchy_level_names(self, value: List[str]) -> None:
+        if len(value) > self.hierarchy_levels:
+            print(f"Number of level names ({len(value)}) exceeds hierarchy levels of descriptor ({self.hierarchy_levels}). "
+                  f"Only the last hierarchy levels ({','.join(value[-self.hierarchy_levels:])}) will be used.")
+        elif len(value) < self.hierarchy_levels:
+            print(f"Number of level names ({len(value)}) is less than hierarchy levels of descriptor ({self.hierarchy_levels}). "
+                  "Not updating names and using current names.")
+            return
+        # At most as many names as levels (note coarse to fine structure of hierarchy)
+        self._hierarchy_level_names = value[-self.hierarchy_levels:]
+        self.default_names = False
+        
     def update_classes(self) -> None:
         self.classes = [[self.id_to_name[level][self.predIndex_to_targetId[level][class_idx+self._offset[level]]] 
                                 for class_idx in range(self.num_classes[level])] 
@@ -265,7 +287,6 @@ class CustomDataset(datasets.VisionDataset):
         target_transform (callable, optional): A function/transform that takes in the target and transforms it.
 
     .. note:: In `annfile_path`, each line has 2 values in the following format.
-        ::
             source_dir/dog_xxx.png 0
             source_dir/cat_123.png 1
             target_dir/dog_xxy.png 0
@@ -290,10 +311,14 @@ class CustomDataset(datasets.VisionDataset):
         self.loader = default_loader
         self.annfile_path = annfile_path
         if descriptor is not None:
+            if getattr(self, 'hierarchy_level_names', False) and descriptor.default_names:
+                # Property setter will set default_names to False
+                descriptor.hierarchy_level_names = self.hierarchy_level_names
             self.descriptor = descriptor
             self.classes = descriptor.classes
         elif descriptor_file is not None:
-            self.descriptor = DatasetDescriptor(descriptor_file, hierarchy_levels)
+            self.descriptor = DatasetDescriptor(descriptor_file, hierarchy_levels, 
+                                                level_names=getattr(self, 'hierarchy_level_names', None))
             self.classes = self.descriptor.classes
         elif classes is not None:
             self.classes = classes

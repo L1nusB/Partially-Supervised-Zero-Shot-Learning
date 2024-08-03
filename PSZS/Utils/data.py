@@ -17,24 +17,35 @@ def create_data_objects(args: Namespace,
                         img_dtype: torch.dtype = torch.float32,
                         descriptor: Optional[DatasetDescriptor|Sequence[DatasetDescriptor]] = None,
                         include_source_val_test: bool = False,
-                        task_key: str = 'tasks'
+                        task_key: str = 'tasks',
+                        shared_key: str = 'target_shared',
+                        novel_key: str = 'target_novel',
+                        split: bool = True,
+                        ensure_balance: bool = False,
                         ) -> Tuple[ForeverDataIterator, Optional[ForeverDataIterator]] | DataLoader | Tuple[DataLoader, ...]:
     if phase == 'train':
         return prepare_data_train(args=args,
-                                  batch_size=batch_size,
-                                  device=device,
-                                  collate_fn=collate_fn,
-                                  img_dtype=img_dtype,
-                                  descriptor=descriptor)
+                                batch_size=batch_size,
+                                device=device,
+                                collate_fn=collate_fn,
+                                img_dtype=img_dtype,
+                                descriptor=descriptor,
+                                shared=True if getattr(args, shared_key, False) else False,
+                                shared_key=shared_key,
+                                use_phase=split,
+                                ensure_balance=ensure_balance)
     elif phase == 'val' or phase == 'test' or phase == 'val_test':
         return prepare_data_val_test(args=args, 
-                                     batch_size=batch_size, 
-                                     device=device, 
-                                     collate_fn=collate_fn, 
-                                     img_dtype=img_dtype,
-                                     descriptor=descriptor, 
-                                     include_source=include_source_val_test,
-                                     phase=phase,)
+                                    batch_size=batch_size, 
+                                    device=device, 
+                                    collate_fn=collate_fn, 
+                                    img_dtype=img_dtype,
+                                    descriptor=descriptor, 
+                                    include_source=include_source_val_test,
+                                    phase=phase,
+                                    shared_key=shared_key,
+                                    novel_key=novel_key,
+                                    use_phase=split)
     elif phase == 'custom_test':
         return prepare_data_test_custom(args=args,
                                         batch_size=batch_size,
@@ -42,19 +53,24 @@ def create_data_objects(args: Namespace,
                                         collate_fn=collate_fn,
                                         img_dtype=img_dtype,
                                         descriptor=descriptor,
-                                        task_key=task_key)
+                                        task_key=task_key,
+                                        use_phase=split)
     else:
         raise ValueError(f'Phase {phase} not supported. '
-                         'Use "train", "val", "test","val_test" or "custom_test".')
+                        'Use "train", "val", "test","val_test" or "custom_test".')
     
 
 def prepare_data_train(
         args: Namespace,
-        batch_size: Sequence[int],
+        batch_size: int | Sequence[int],
         device: torch.device = torch.device('cuda'),
         collate_fn: Optional[Callable] = None,
         img_dtype: torch.dtype = torch.float32,
-        descriptor: Optional[Sequence[DatasetDescriptor]] = None,
+        descriptor: Optional[DatasetDescriptor | Sequence[DatasetDescriptor]] = None,
+        shared: bool = True,
+        shared_key: str = 'target_shared',
+        use_phase: bool = True,
+        ensure_balance: bool = False,
     ) -> Tuple[ForeverDataIterator, Optional[ForeverDataIterator]]:
     # Prepare training data
     re_num_splits = 0
@@ -63,9 +79,18 @@ def prepare_data_train(
         # in timm there is a differentiation if num_aug_splits is given (no param here)
         re_num_splits = 2
     if descriptor is not None:
-        assert len(descriptor) == 2, 'Two descriptors required for source and shared target datasets.'
+        if shared:
+            assert isinstance(descriptor, DatasetDescriptor)==False and len(descriptor) == 2, 'Two descriptors required for source and shared target datasets.'
+        else:
+            # Ensure that descriptor is a list/sequence
+            if isinstance(descriptor, DatasetDescriptor):
+                descriptor = [descriptor]
     else:
+        # Just universally set to two None values (irrespective of shared)
+        # as we just index the first element anyways so the other does not matter
         descriptor = [None, None]
+    if isinstance(batch_size, int):
+        batch_size = [batch_size, batch_size]
         
     dataloader_args = dict({
         "input_size":args.resize_size,
@@ -111,7 +136,7 @@ def prepare_data_train(
         "root":args.root,
         "split":args.ds_split,
         "transform":transform_train,
-        "phase":'train',
+        "phase":'train' if use_phase else None,
         "infer_all_classes":args.infer_all_class_levels,
     })
     
@@ -127,20 +152,41 @@ def prepare_data_train(
                                       **dataloader_args)
     iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
     
-    if args.target_shared:
+    if shared:
         # Is set to None if not given as parameter
         dataset_args["descriptor"] = descriptor[1]
         dataset_args["descriptor_file"] = "descriptor_shared.txt"
         dataset_target = get_dataset(dataset_name=args.data,
-                                     tasks=args.target_shared,
+                                     tasks=getattr(args, shared_key),
                                      **dataset_args)
         
         loader_target = build_dataloader(dataset=dataset_target,
                                           batch_size=batch_size[1],
                                           **dataloader_args)
         iter_target = ForeverDataIterator(loader_target, device, on_device=not args.no_prefetch)
+        
+        # Only makes sense if there is another loader/iterator to compare to
+        rebalance, bs_source, bs_target = check_balanced_dataloaders(iter_source, iter_target)
+        if rebalance: 
+            if ensure_balance:
+                print(f"Rebalancing batch sizes to {bs_source} and {bs_target} for source and target shared domain.")
+                
+                loader_source = build_dataloader(dataset=dataset_source,
+                                        batch_size=bs_source,
+                                        **dataloader_args)
+                iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
+                
+                loader_target = build_dataloader(dataset=dataset_target,
+                                            batch_size=bs_target,
+                                            **dataloader_args)
+                iter_target = ForeverDataIterator(loader_target, device, on_device=not args.no_prefetch)
+            else:
+                print("Dataloaders for source and target shared are unbalanced. "
+                      "To ensure balanced training set ensure_balance=True (--ensure-domain-balance) "
+                      "or specify batch sizes manually (e.g. via --batch-split-ratio).")
     else:
         iter_target = None
+        
     
     return iter_source, iter_target
 
@@ -153,6 +199,9 @@ def prepare_data_val_test(
         descriptor: Optional[DatasetDescriptor] = None,
         include_source: bool = False,
         phase: str = 'val_test',
+        shared_key: str = 'target_shared',
+        novel_key: str = 'target_novel',
+        use_phase: bool = True,
     ) -> Tuple[DataLoader, ...]:
     # Prepare validation data
     transform_val_test = build_transform(input_size=args.resize_size,
@@ -165,7 +214,7 @@ def prepare_data_val_test(
                                          std=args.norm_std,
                                          use_prefetcher=not args.no_prefetch)
     
-    target_tasks = args.target_shared + args.target_novel if args.target_shared else args.target_novel
+    target_tasks = getattr(args, shared_key) + getattr(args, novel_key) if getattr(args, shared_key, False) else getattr(args, novel_key)
     all_tasks = args.source + target_tasks if include_source else target_tasks
     
     loader_args = dict({
@@ -195,7 +244,7 @@ def prepare_data_val_test(
     if 'val' in phase:
         dataset_val = get_dataset(dataset_name=args.data,
                                   tasks=all_tasks,
-                                  phase='val', 
+                                  phase='val' if use_phase else None, 
                                   **dataset_args)
         loader_val = build_dataloader(dataset=dataset_val, **loader_args)
         results.append(loader_val)
@@ -203,13 +252,17 @@ def prepare_data_val_test(
     if 'test' in phase:
         dataset_test = get_dataset(dataset_name=args.data,
                                    tasks=all_tasks,
-                                   phase='test', 
+                                   phase='test' if use_phase else None, 
                                    **dataset_args)
         loader_test = build_dataloader(dataset=dataset_test, **loader_args)
         results.append(loader_test)
         
     if len(results) == 0:
         warnings.warn(f'No datasets loaded for phase {phase}. Include "val" or "test" in phase.')
+    elif len(results) == 2 and use_phase == False:
+        # Could be possible that this is still desired so just inform the user but nothing more
+        print(f'Loaded datasets for validation and test without phase information. '
+              'This results in the same data being loaded for both validation and test.')
     
     return results
 
@@ -220,7 +273,8 @@ def prepare_data_test_custom(
         collate_fn: Optional[Callable] = None,
         img_dtype: torch.dtype = torch.float32,
         descriptor: Optional[DatasetDescriptor] = None,
-        task_key: str = 'tasks'
+        task_key: str = 'tasks',
+        use_phase: bool = True,
     ) -> DataLoader:
     # Prepare validation data
     transform_val_test = build_transform(input_size=args.resize_size,
@@ -251,7 +305,7 @@ def prepare_data_test_custom(
         "descriptor":descriptor,
         "descriptor_file":"descriptor_total.txt",
         "transform":transform_val_test,
-        "phase": 'test',
+        "phase": 'test' if use_phase else None,
         "infer_all_classes":args.infer_all_class_levels,
     })
     
@@ -261,3 +315,23 @@ def prepare_data_test_custom(
     loader = build_dataloader(dataset=dataset, **loader_args)
     
     return loader
+
+def check_balanced_dataloaders(loader1: DataLoader | ForeverDataIterator, 
+                               loader2: DataLoader | ForeverDataIterator, 
+                               threshold: float = 0.2
+                               ) -> Tuple[bool, int, int]:
+    len1 = len(loader1)
+    len2 = len(loader2)
+    data1 = len(loader1.dataset)
+    data2 = len(loader2.dataset)
+    total_batch_size = loader1.batch_size + loader2.batch_size
+    dispary_ratio = abs(len1-len2) / (len1+len2)
+    rebalance = False
+    if dispary_ratio >= threshold:
+        warnings.warn(f"Disparity between source and target shared domain is greater than 20% ({dispary_ratio*100:3.2f}%) "
+                      f"when using batch sizes ({loader1.batch_size}, {loader2.batch_size}). "
+                      "This can cause imbalanced training. ")
+        rebalance = True
+    balanced_batch_size1 = int(total_batch_size / ((data2/data1)+1))
+    balanced_batch_size2 = total_batch_size-balanced_batch_size1
+    return rebalance, balanced_batch_size1, balanced_batch_size2

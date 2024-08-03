@@ -2,17 +2,15 @@ import os
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Any
 
 from .CustomDataset import CustomDataset, DatasetDescriptor
-from ._CompCarsClasses import *
 
-class CompCars(CustomDataset):
+class CUB(CustomDataset):
     image_list = {
-        'wTot' : 'web_total.txt',
-        'wNov' : 'web_novel.txt',
-        'wShr' : 'web_shared.txt',
-        'svTot' : 'sv_total.txt',
-        'svNov' : 'sv_novel.txt',
-        'svShr' : 'sv_shared.txt',
-        'w_sv_comb' : 'web_total_sv_shared.txt',
+        'rawTot' : 'cubRaw_total.txt',
+        'rawNov' : 'cubRaw_novel.txt',
+        'rawShr' : 'cubRaw_shared.txt',
+        'drawingTot' : 'cubDrawing_total.txt',
+        'drawingNov' : 'cubDrawing_novel.txt',
+        'drawingShr' : 'cubDrawing_shared.txt',
     }
     def __init__(self, 
                  root: str, 
@@ -41,23 +39,19 @@ class CompCars(CustomDataset):
         if descriptor_file is not None:
             descriptor_file = os.path.join(root, annfile_dir, descriptor_file)
         
-        self.hierarchy_level_names = ['Type', 'Make', 'Model']
-        # self.hierarchy_level_names = ['Make', 'Model']
+        self.hierarchy_level_names = ['Order', 'Family', 'Genus', 'Species']
         # Omit many arguments that are just not used in practice (currently)
-        super(CompCars, self).__init__(root, 
-                                       annfile_path=annfile_path,
-                                       descriptor=descriptor,
-                                       descriptor_file=descriptor_file,
-                                       transform=transform)
+        super(CUB, self).__init__(root, 
+                                  annfile_path=annfile_path,
+                                  descriptor=descriptor,
+                                  descriptor_file=descriptor_file,
+                                  transform=transform)
         
         # The index in the target label corresponding to the main class
         # e.g., if the format is [classIndexType][sub_sep][classIndexMake][sub_sep][classIndexModel]
         # if the main label is the model then main_class_idx=2
         # if the main label is the make then main_class_idx=1
-        # Note that in "older" datasets the type is not included and thus 
-        # the above example would be [classIndexMake][sub_sep][classIndexModel]
-        # and the main_class_idxs would be 1 and 0 respectively
-        # Therefore use negative values as default to indicate the last class
+        # Use negative values as default to indicate the last class
         if main_class_idx < 0:
             main_class_idx = len(self.samples[0][1]) + main_class_idx
         self.main_class_idx = main_class_idx

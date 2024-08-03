@@ -18,6 +18,10 @@ from PSZS.Utils.transformations import _get_resizing_transform
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
+__all__ = ['ConcatDataset', 'get_dataset_names', 'get_dataset', 
+           'transform_target', 'build_remapped_descriptors', 'build_transform',
+           'build_descriptors', 'build_descriptor']
+
 def flatten_nested_list(nested_list : Sequence, make_unique: bool = True) -> List:
         flattened_list = []
         for item in nested_list:
@@ -77,9 +81,9 @@ class ConcatDataset(_ConcatDataset):
             
 def get_dataset_names():
     return sorted(
-        name for name in datasets.__dict__
+        name for name in datasets.dataset_ls
         if not name.startswith("__") and callable(datasets.__dict__[name])
-    ) + ['Digits']
+    )
     
 
 def get_dataset(dataset_name: str, 
@@ -97,6 +101,62 @@ def get_dataset(dataset_name: str,
         
     # Always return ConcatDataset to allow uniform access to attributes
     return ConcatDataset([dataset(task=task, descriptor=descriptor, **filtered_kwargs) for task in tasks])
+
+def build_descriptor(fileRoot: str | PathLike[str],
+                     fName: str,
+                     ds_split: Optional[str|int]=None,
+                     level_names: Optional[Sequence[str]] = None,
+                     ) -> DatasetDescriptor:
+    """Constructs a dataset descriptors for the given dataset split.
+
+    Args:
+        fileRoot (str | PathLike[str]): 
+            Pathlike object to the root directory of the dataset split.
+        ds_split (Optional[str | int], optional): 
+            Specified for dataset split. If not given no specified gets added. Defaults to None.
+        level_names (Optional[Sequence[str]], optional):
+            Names of the hierarchy levels. Will be stored in the Descriptors. Defaults to None.
+
+    Returns:
+        DatasetDescriptor: 
+            Dataset descriptors.
+    """
+    root = Path(fileRoot)
+    split_subpath = 'annfiles'
+    if ds_split is not None:
+        split_subpath += f'_Split{ds_split}'
+    if fName[-3:] != 'txt':
+        fName += '.txt'
+        
+    descriptor = DatasetDescriptor(filePath=root / split_subpath / fName, 
+                                         level_names=level_names)
+    return descriptor
+
+def build_descriptors(fileRoot: str | PathLike[str],
+                      ds_split: Optional[str|int]=None,
+                      level_names: Optional[Sequence[str]] = None,
+                      ) -> Tuple[DatasetDescriptor, DatasetDescriptor]:
+    """Constructs the total and novel dataset descriptors for the given dataset split.
+    
+    .. note::
+        No need for remapping or similar as there is no shared descriptors.
+
+    Args:
+        fileRoot (str | PathLike[str]): 
+            Pathlike object to the root directory of the dataset split.
+        ds_split (Optional[str | int], optional): 
+            Specified for dataset split. If not given no specified gets added. Defaults to None.
+        level_names (Optional[Sequence[str]], optional):
+            Names of the hierarchy levels. Will be stored in the Descriptors. Defaults to None.
+
+    Returns:
+        Tuple[DatasetDescriptor, DatasetDescriptor]: 
+            Tuple containing the total and novel dataset descriptors.
+    """
+    total_descriptor = build_descriptor(fileRoot, "descriptor_total.txt", ds_split, level_names)
+    novel_descriptor = build_descriptor(fileRoot, "descriptor_novel.txt", ds_split, level_names)
+    return total_descriptor, novel_descriptor    
+    
 
 def build_remapped_descriptors(fileRoot: str | PathLike[str],
                                ds_split: Optional[str|int]=None,
@@ -119,43 +179,53 @@ def build_remapped_descriptors(fileRoot: str | PathLike[str],
             Pathlike object to the root directory of the dataset split.
         ds_split (Optional[str | int], optional): 
             Specified for dataset split. If not given no specified gets added. Defaults to None.
+        level_names (Optional[Sequence[str]], optional):
+            Names of the hierarchy levels. Will be stored in the Descriptors. Defaults to None.
 
     Returns:
         Tuple[DatasetDescriptor, DatasetDescriptor, DatasetDescriptor]: 
             Tuple containing the total, shared and novel dataset descriptors.
     """
-    root = Path(fileRoot)
-    split_subpath = 'annfiles'
-    if ds_split is not None:
-        split_subpath += f'_Split{ds_split}'
-        
-    total_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_total.txt", 
-                                         level_names=level_names)
-    shared_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_shared.txt", 
-                                          level_names=level_names)
-    novel_descriptor = DatasetDescriptor(filePath=root / split_subpath / "descriptor_novel.txt", 
-                                         level_names=level_names)
+    total_descriptor = build_descriptor(fileRoot, "descriptor_total.txt", ds_split, level_names)
+    shared_descriptor = build_descriptor(fileRoot, "descriptor_shared.txt", ds_split, level_names)
+    novel_descriptor = build_descriptor(fileRoot, "descriptor_novel.txt", ds_split, level_names)
     
+    # For types no offset needs to be applied
     # For makes a uniform offset can not be applied as they are partially shared 
     # between shared and novel
     # For models use num_classes of shared as offset as these are exclusive 
     # between shared and novel
-    novel_descriptor.offset = [0, shared_descriptor.num_classes[1]]
+    ### Only apply offset to the last level as the others are non exclusive ###
+    novel_descriptor.offset = [0]*(novel_descriptor.hierarchy_levels-1) + [shared_descriptor.num_classes[-1]]
     
-    # Reindex the makes such that the shared makes are first
-    # i.e. truly novel makes start at the end of the shared makes
-    new_make_idx = shared_descriptor.num_classes[0]
-    shared_makes = shared_descriptor.targetId_to_predIndex[0].keys()
-    novel_makes = novel_descriptor.targetId_to_predIndex[0].keys()
-    true_novel_makes = set(novel_makes).difference(shared_makes)
-    for make in true_novel_makes:
-        prevIndex = novel_descriptor.targetId_to_predIndex[0][make]
-        novel_descriptor.targetId_to_predIndex[0][make] = new_make_idx
-        novel_descriptor.predIndex_to_targetId[0][new_make_idx] = make
-        # Remove old index
-        novel_descriptor.predIndex_to_targetId[0].pop(prevIndex)
-        new_make_idx += 1
-    # Create mapping after applying offset and reindexing makes
+    # Reindex the levels such that the shared classes are first
+    # i.e. truly novel classes start at the end of the shared classes
+    for lvl in range(novel_descriptor.hierarchy_levels-1):
+        new_idx = shared_descriptor.num_classes[lvl]
+        shared_classes = shared_descriptor.targetId_to_predIndex[lvl].keys()
+        novel_classes = novel_descriptor.targetId_to_predIndex[lvl].keys()
+        true_novel_classes = set(novel_classes).difference(shared_classes)
+        for c in true_novel_classes:
+            prevIndex = novel_descriptor.targetId_to_predIndex[lvl][c]
+            novel_descriptor.targetId_to_predIndex[lvl][c] = new_idx
+            novel_descriptor.predIndex_to_targetId[lvl][new_idx] = c
+            # Remove old index
+            novel_descriptor.predIndex_to_targetId[lvl].pop(prevIndex)
+            new_idx += 1
+            
+    # new_make_idx = shared_descriptor.num_classes[0]
+    # shared_makes = shared_descriptor.targetId_to_predIndex[0].keys()
+    # novel_makes = novel_descriptor.targetId_to_predIndex[0].keys()
+    # true_novel_makes = set(novel_makes).difference(shared_makes)
+    # for make in true_novel_makes:
+    #     prevIndex = novel_descriptor.targetId_to_predIndex[0][make]
+    #     novel_descriptor.targetId_to_predIndex[0][make] = new_make_idx
+    #     novel_descriptor.predIndex_to_targetId[0][new_make_idx] = make
+    #     # Remove old index
+    #     novel_descriptor.predIndex_to_targetId[0].pop(prevIndex)
+    #     new_make_idx += 1
+        
+    # Create mapping after applying offset and reindexing other levels
     # and update total_descriptor
     for i in range(novel_descriptor.hierarchy_levels):
         mapping = shared_descriptor.targetId_to_predIndex[i].copy()

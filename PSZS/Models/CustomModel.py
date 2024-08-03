@@ -91,54 +91,55 @@ class CustomModel(nn.Module):
                  **classifier_kwargs) -> None:
         """
         Args:
-        backbone (torch.nn.Module): 
-            Backbone to extract 2-d features from data
-        num_classes (np.ndarray): 
-            Number of classes. Gets expanded to (num_inputs, num_head_predictions).
-        num_inputs (int): 
-            Number of inputs to the classifier during training forward pass.
-        classifier_type (Optional[str]): 
-            Type of the classifier to use. Must be one of the available classifiers. 
-             If `None`, the model is the backbone itself
-        head_type (str): 
-            Type of the head to use. Must be one of the available heads. Defaults to `'SimpleHead'`
-        bottleneck_dim (Optional[int]): 
-            Dimension of the bottleneck layer applied after backbone. 
-             If not specified (or <= 0) no bottleneck (identify) is applied. Defaults to None.
-        opt_kwargs (dict): 
-            Keyword arguments for the optimizer(s)
-        sched_kwargs (dict): 
-            Keyword arguments for the scheduler(s)
-        hierarchy_accum_func (Callable | str): 
-            Function to accumulate the loss components for hierarchical heads. If a string is given, 
-             the corresponding function is resolved. Defaults to `None`.
-        feature_loss_func (Optional[Callable | str]): 
-            Function to compute the feature loss. If a string is given, resolve the function. 
-             If `None` is given no additional feature loss will be used. Defaults to None.
-        feature_accum_func (Optional[Callable | str]): 
-            Function to accumulate the feature loss components. If a string is given, resolve the function 
-             Only relevant if `feature_loss_func` is not `None`. 
-            If not specified tries to resolve based on `DEFAULT_ACCUM` and specified loss. 
-             If loss is given as a callable defaults to `sum`. Defaults to `None`.
-        logit_loss_func (Optional[Callable | str]):
-            Function to compute the logit loss. If a string is given, resolve the function.
-        logit_accum_func (Optional[Callable | str]):
-            Function to accumulate the logit loss components. If a string is given, resolve the function 
-             Only relevant if `logit_loss_func` is not `None`. 
-            If not specified tries to resolve based on `DEFAULT_ACCUM` and specified loss. 
-             If loss is given as a callable defaults to `sum`. Defaults to `None`.
-        additional_params (dict): 
-            Additional Parameters any additional loss functions that require additional parameters
-             as well as parameters for hierarchy mixing.
-        classifier_kwargs (dict): 
-            Keyword arguments for the classifier and head
-            - num_features (Optional[int]): Number of features before the head layer
-            - auto_split (bool): Whether to automatically split the features into len(num_classes). 
-            - test_head_idx (int): Index of the head to use for testing/validation
-            - test_head_pred_idx (Optional[int]): Index of the prediction the head produce to use for testing/validation
-            - head_depth (int | Sequence[int]): Depth of the heads. Defaults to 1.
-            - reduction_factor (float | Sequence[float]): Reduction factor for the heads in each depth step. Defaults to 2.
-            - hierarchy_level (Optional[int]): Level of hierarchy for hierarchical head. (default: None)
+            backbone (torch.nn.Module): 
+                Backbone to extract 2-d features from data
+            num_classes (np.ndarray): 
+                Number of classes. Gets expanded to (num_inputs, num_head_predictions).
+            num_inputs (int): 
+                Number of inputs to the classifier during training forward pass.
+            classifier_type (Optional[str]): 
+                Type of the classifier to use. Must be one of the available classifiers. 
+                 If `None`, the model is the backbone itself
+            head_type (str): 
+                Type of the head to use. Must be one of the available heads. Defaults to `'SimpleHead'`
+            bottleneck_dim (Optional[int]): 
+                Dimension of the bottleneck layer applied after backbone. 
+                 If not specified (or <= 0) no bottleneck (identify) is applied. Defaults to None.
+            opt_kwargs (dict): 
+                Keyword arguments for the optimizer(s)
+            sched_kwargs (dict): 
+                Keyword arguments for the scheduler(s)
+            hierarchy_accum_func (Callable | str): 
+                Function to accumulate the loss components for hierarchical heads. If a string is given, 
+                 the corresponding function is resolved. Defaults to `None`.
+            feature_loss_func (Optional[Callable | str]): 
+                Function to compute the feature loss. If a string is given, resolve the function. 
+                 If `None` is given no additional feature loss will be used. Defaults to None.
+            feature_accum_func (Optional[Callable | str]): 
+                Function to accumulate the feature loss components. If a string is given, resolve the function 
+                 Only relevant if `feature_loss_func` is not `None`. 
+                If not specified tries to resolve based on `DEFAULT_ACCUM` and specified loss. 
+                 If loss is given as a callable defaults to `sum`. Defaults to `None`.
+            logit_loss_func (Optional[Callable | str]):
+                Function to compute the logit loss. If a string is given, resolve the function.
+            logit_accum_func (Optional[Callable | str]):
+                Function to accumulate the logit loss components. If a string is given, resolve the function 
+                 Only relevant if `logit_loss_func` is not `None`. 
+                If not specified tries to resolve based on `DEFAULT_ACCUM` and specified loss. 
+                 If loss is given as a callable defaults to `sum`. Defaults to `None`.
+            additional_params (dict): 
+                Additional Parameters any additional loss functions that require additional parameters
+                as well as parameters for hierarchy mixing.
+            classifier_kwargs (dict): 
+                Keyword arguments for the classifier and head
+                - num_features (Optional[int]): Number of features before the head layer
+                - auto_split (bool): Whether to automatically split the features into len(num_classes). 
+                - auto_split_indices (Optional[Sequence[int]]): Indices to split the features when auto_split is True
+                - test_head_idx (int): Index of the head to use for testing/validation
+                - test_head_pred_idx (Optional[int]): Index of the prediction the head produce to use for testing/validation
+                - head_depth (int | Sequence[int]): Depth of the heads. Defaults to 1.
+                - reduction_factor (float | Sequence[float]): Reduction factor for the heads in each depth step. Defaults to 2.
+                - hierarchy_level (Optional[int]): Level of hierarchy for hierarchical head. (default: None)
         """
         # Fix ciruclar import
         from PSZS.Models.models import construct_classifier
@@ -214,8 +215,8 @@ class CustomModel(nn.Module):
                              f"Must be one of {MIXING_STRATEGIES} or "
                              f"{list(MIXING_STRATEGY_MAP.keys())}")        
     
-    def mixing_weight(self, increase_step: bool = True) -> Tuple[float, float]:
-        """Computes the mixing weights between the coarse and fine labels. (Returns the weight of the coarse labels.)
+    def mixing_weight(self, increase_step: bool = True) -> Tuple[float, ...]:
+        """Computes the mixing weights for each level of the hierarchy.
         The weight is determined by the strategy set in the constructor, initial and final parameters,
         maximal number of steps until mixing is at maximum and the current mixing step.
         If `increase_step` is True, the mixing step is increased by 1.
@@ -228,13 +229,13 @@ class CustomModel(nn.Module):
         - fixed: always return the final weight
 
         Returns:
-            (float, float): Weight for coarse and fine labels.
+            Tuple[float,...]: Weight for labels of each hierarchy level.
         """
         mix_progress = mixing_progress(self.mixing_strategy, self.mixing_step, self.max_mixing_steps)
         if increase_step:
             self.mixing_step += 1
-        coarse_weight = self.initial_coarse_weight + (self.final_coarse_weight - self.initial_coarse_weight) * mix_progress
-        return coarse_weight, 1 - coarse_weight
+        weights = self.initial_weights + (self.final_weights - self.initial_weights) * mix_progress
+        return weights
         
     def _register_hierarchy_accum(self) -> None:
         """Sets values of `hierarchy_accum_func` and `hierarchy_weights` based on the current `hierarchy_accum_func`.
@@ -242,7 +243,7 @@ class CustomModel(nn.Module):
         Valid values for `hierarchy_accum_func` are: sum, avg, mean, make, model, weighted.
         """
         if self.head_type.returns_multiple_outputs:
-            components_count = getattr(self.head_type, "hierarchy_levels", 2)
+            components_count = self.classifier.num_head_pred
         else:
             components_count = 1
             
@@ -255,9 +256,9 @@ class CustomModel(nn.Module):
                 case "avg" | "mean":
                     self.hierarchy_accum_func = avg_accum
                 case "make":
-                    self.hierarchy_accum_func = partial(indexed_accum, 0)
+                    self.hierarchy_accum_func = partial(indexed_accum, -2)
                 case "model":
-                    self.hierarchy_accum_func = partial(indexed_accum, 1)
+                    self.hierarchy_accum_func = partial(indexed_accum, -1)
                 case "coarse" | "coarse_sum":
                     self.hierarchy_accum_func = partial(coarse_sum_accum, 
                                                         fine_index=self.classifier.test_head_pred_idx)
@@ -265,20 +266,60 @@ class CustomModel(nn.Module):
                     self.hierarchy_accum_func = partial(coarse_avg_accum, 
                                                         fine_index=self.classifier.test_head_pred_idx)
                 case "weighted":
-                    self.hierarchy_weights = nn.Parameter(construct_weights(weights=self.additional_params.get('hierarchy_accum_weights', [0.2, 0.8]), 
-                                                                            length=components_count))
+                    weights = self.additional_params.get('hierarchy_weights', None)
+                    # Check if weights are given, if not use default weights
+                    if weights is None:
+                        weights = [0.8]
+                        # Use Normalization by default if no weights given (but allow to be overwritten)
+                        normalize = self.additional_params.get('normalize_weights', True)
+                    else:
+                        # Do not use Normalization by default if weights given (but allow to be overwritten)
+                        normalize = self.additional_params.get('normalize_weights', False)
+                    # Parameter so it is sent to device as well (but no gradients)
+                    self.hierarchy_weights = nn.Parameter(construct_weights(weights=weights, 
+                                                                            length=components_count,
+                                                                            normalized=normalize),
+                                                          requires_grad=False)
+                    assert len(self.hierarchy_weights) == components_count, f"Number of weights ({len(self.hierarchy_weights)}) must match number of components ({components_count})."
                     self.hierarchy_accum_func = partial(weighted_accum, weights=self.hierarchy_weights)
                 case _:
                     self.mixing_strategy = self.resolve_mixing_strategy(self.hierarchy_accum_func)
                     if self.mixing_strategy:
-                        self.initial_coarse_weight = self.additional_params.get('intial_coarse_weight', 0.9)
-                        self.final_coarse_weight = self.additional_params.get('final_coarse_weight', 0.1)
-                        # If not specified will be set as 10*num_iters in Base_Optimizer
+                        initial_weight = self.additional_params.get('initial_weights', None)
+                        final_weight = self.additional_params.get('final_weights', None)
+                        # Check if initial and final are given, if not use default weights for finest level and construct other levels
+                        if initial_weight is None:
+                            normalize = self.additional_params.get('normalize_weights', True)
+                            initial_weight = construct_weights(weights=[0.1], 
+                                                               length=components_count,
+                                                               normalized=normalize)
+                        elif len(initial_weight) != components_count:
+                            # Partial initial weights given, construct the rest
+                            normalize = self.additional_params.get('normalize_weights', True)
+                            initial_weight = construct_weights(weights=initial_weight,
+                                                               length=components_count,
+                                                               normalized=normalize)
+                        if final_weight is None:
+                            normalize = self.additional_params.get('normalize_weights', True)
+                            final_weight = construct_weights(weights=[0.9], 
+                                                               length=components_count,
+                                                               normalized=normalize)
+                        elif len(final_weight) != components_count:
+                            # Partial final weights given, construct the rest
+                            normalize = self.additional_params.get('normalize_weights', True)
+                            final_weight = construct_weights(weights=final_weight,
+                                                               length=components_count,
+                                                               normalized=normalize)
+                        self.initial_weights = nn.Parameter(initial_weight, requires_grad=False)
+                        self.final_weights = nn.Parameter(final_weight, requires_grad=False)
+                        # self.initial_coarse_weight = self.additional_params.get('initial_weights', 0.9)
+                        # self.final_coarse_weight = self.additional_params.get('final_weights', 0.1)
+                        # If not specified will be set as max_mixing_epochs(10)*num_iters in Base_Optimizer
                         self.max_mixing_steps = self.additional_params.get('max_mixing_steps', None)
                         self.mixing_step = 0
                         self.hierarchy_accum_func = partial(dynamic_weighted_accum, weight_func=self.mixing_weight)
                     else:
-                        raise ValueError(f"Invalid hierarchy-accum {self.hierarchy_accum_func}. Valid values are: sum, avg, make, model, weighted")
+                        raise ValueError(f"Invalid hierarchy-accum {self.hierarchy_accum_func}. Valid values are: sum, avg, make, model, weighted, dynamic")
     
     def _auto_resolve_accum(self, 
                             loss_specifier: str, 
@@ -536,16 +577,21 @@ class CustomModel(nn.Module):
     def compute_cls_loss(self, 
                          pred: PRED_TYPE, 
                          target: LABEL_TYPE
-                         ) -> Tuple[float, Sequence[float]]:
+                         ) -> Tuple[torch.Tensor, Sequence[torch.Tensor]]:
         if self.head_type.returns_multiple_outputs:
+            # Pad/Support for Base_Single optimizers
+            if self.num_inputs < 2:
+                assert isinstance(target, torch.Tensor), f'Single input requires single target tensor. Got {type(target)}'
+                assert isinstance(pred[0], torch.Tensor), f'Single input requires single prediction tensor. Got {type(pred[0])}'
+                # Wrap target into tuple to work for Single and Multiple predictions/inputs (Optimizer_Single, Optimizer_Multiple)
+                target = (target,)
+                # Wrap pred into tuple to work for Single and Multiple predictions/inputs (Optimizer_Single, Optimizer_Multiple)
+                pred = (pred,)
             # Hierarchical head with multiple results per sample (multiple heads) 
             # --> Requires gt_label also contain multiple labels per sample
             # Match split feature predictions with ground truth labels
             assert len(pred[0])<=target[0].shape[-1], (f"Number of predictions ({len(pred[0])}) must "
                                                           f"be less than or equal to number of labels ({target[0].shape[-1]}).")
-            if isinstance(target, torch.Tensor):
-                # Wrap target into tuple to work for Single and Multiple predictions/inputs (Optimizer_Single, Optimizer_Multiple)
-                target = (target,)
             loss_components = [self.hierarchy_accum_func(
                                 [self.cls_loss_func(p[level], gt[:,level]) for level in range(len(p))]
                                 ) for p, gt in zip(pred, target)]
@@ -579,12 +625,18 @@ class CustomModel(nn.Module):
         """
         params = {}
         params['additional_params'] = {}
-        params['additional_params']['hierarchy_accum_weights'] = kwargs.get('hierarchy_accum_weights', [0.2,0.8])
-        kwargs.pop('hierarchy_accum_weights', None)
-        params['additional_params']['intial_coarse_weight'] = kwargs.get('intial_coarse_weight', 0.9)
-        kwargs.pop('intial_coarse_weight', None)
-        params['additional_params']['final_coarse_weight'] = kwargs.get('final_coarse_weight', 0.1)
-        kwargs.pop('final_coarse_weight', None)
+        if 'hierarchy_weights' in kwargs:
+            params['additional_params']['hierarchy_weights'] = kwargs.get('hierarchy_weights')
+            kwargs.pop('hierarchy_weights', None)
+        if 'normalize_weights' in kwargs:
+            params['additional_params']['normalize_weights'] = kwargs.get('normalize_weights')
+            kwargs.pop('normalize_weights', None)
+        if 'initial_weights' in kwargs:
+            params['additional_params']['initial_weights'] = kwargs.get('initial_weights')
+            kwargs.pop('initial_weights', None)
+        if 'final_weights' in kwargs:
+            params['additional_params']['final_weights'] = kwargs.get('final_weights')
+            kwargs.pop('final_weights', None)
         params['additional_params']['max_mixing_steps'] = kwargs.get('max_mixing_steps', None)
         kwargs.pop('max_mixing_steps', None)
         

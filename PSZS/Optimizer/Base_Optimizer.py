@@ -31,7 +31,7 @@ LABEL_TYPE: TypeAlias = torch.Tensor |Tuple[torch.Tensor,...]
 
 class Base_Optimizer():
     def __init__(self, 
-                 train_iters: Sequence[ForeverDataIterator], 
+                 train_iters: ForeverDataIterator | Sequence[ForeverDataIterator], 
                  val_loader: DataLoader, 
                  model: CustomModel, 
                  iters_per_epoch: int, 
@@ -163,8 +163,11 @@ class Base_Optimizer():
         return self.model.lr_schedulers
     
     @property
-    def train_descriptors(self) -> List[Optional[DatasetDescriptor]]:
-        return [it.dataset_descriptor for it in self.train_iters]
+    def train_descriptors(self) -> Optional[DatasetDescriptor] | List[Optional[DatasetDescriptor]]:
+        if isinstance(self.train_iters, ForeverDataIterator):
+            return self.train_iters.dataset_descriptor
+        else:
+            return [it.dataset_descriptor for it in self.train_iters]
     
     @property
     def val_descriptor(self) -> Optional[DatasetDescriptor]:
@@ -180,7 +183,7 @@ class Base_Optimizer():
     
     def _get_train_batch_sizes(self) -> int | List[int]:
         if isinstance(self.train_iters, ForeverDataIterator):
-            return self.train_iters.data_loader.batch_size
+            return self.train_iters.batch_size
         else:
             return [it.batch_size for it in self.train_iters]
         

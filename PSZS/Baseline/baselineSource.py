@@ -3,7 +3,6 @@ import random
 import warnings
 import time
 import json
-import math
 import numpy as np
 
 import torch
@@ -19,7 +18,7 @@ from PSZS.Utils.data import create_data_objects
 from PSZS.Utils.io import filewriter
 from PSZS.Models import *
 from PSZS.Validator.Validator import Validator
-from PSZS.datasets import build_remapped_descriptors, build_descriptor
+from PSZS.datasets import build_descriptors, build_descriptor
 import PSZS.Utils.utils as utils
 from PSZS.AWS import setup_aws, handle_aws_postprocessing
 
@@ -28,7 +27,7 @@ def main(args):
     if setup_success==False:
         warnings.warn("AWS setup failed. Exiting.")
         return
-    exp_name = filewriter.get_experiment_name_v2(args=args)
+    exp_name = filewriter.get_experiment_name_v2(args=args, prefix="Source")
     logger = Logger(root=args.log, exp_name=exp_name, sep_chk=args.separate_checkpoint)
     args.uuid = logger.out_dir.split("_")[-1]
     
@@ -52,6 +51,14 @@ def main(args):
         args.data = 'CompCarsHierarchy'
     
     args.amp = not args.no_amp
+    
+    if args.classification_type != 'DefaultClassifier':
+        warnings.warn(f"Custom classifier {args.classification_type} specified. "
+                      "Baseline single only supports 'DefaultClassifier'. Switching to DefaultClassifier.")
+        args.classification_type = 'DefaultClassifier'
+
+    if args.include_source_eval and args.split_source==False:
+        warnings.warn("Source evaluation is enabled but source domain is not split for training.")
 
 
     print(args)
@@ -85,32 +92,24 @@ def main(args):
     # Currently mixup/cutmix does not work with the new mapping functions
     collate_fn, mixup_fn = utils.setup_mixup_cutmix(args, num_classes=281)
     
-    bs_source = math.floor(args.batch_size * args.batch_split_ratio)
-    bs_target = args.batch_size - bs_source
-    # Bit manupulation to check if power of 2
-    if ((bs_source & (bs_source-1) == 0) and bs_source != 0)==False:
-        print(f"Batch size for source domain {bs_source} is not a power of 2.")
-    if ((bs_target & (bs_target-1) == 0) and bs_target != 0)==False:
-        print(f"Batch size for target shared domain {bs_target} is not a power of 2.")
-    print(f'Batch size source domain: ({bs_source}), target shared domain: ({bs_target})')
-    bs = (bs_source, bs_target)
-    
-    # Construct and remap dataset descriptors
-    total_descriptor, shared_descriptor, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, 
-                                                                                       ds_split=args.ds_split,)
+    # Construct and remap dataset descriptors (No Shared dataset)
+    total_descriptor, novel_descriptor = build_descriptors(fileRoot=args.root, 
+                                                           ds_split=args.ds_split,
+                                                           level_names=['make', 'model'])
     
     eval_classes = list(novel_descriptor.targetIDs[-1])
     
-    # Create data iterators for train (Batch size is split between source and target shared domain)
-    train_source_iter, train_target_iter = create_data_objects(args=args, 
-                                                               batch_size=bs,
-                                                               phase='train',
-                                                               device=device,
-                                                               collate_fn=collate_fn,
-                                                               descriptor=[total_descriptor, shared_descriptor],
-                                                               ensure_balance=args.ensure_domain_balance,)
-    # Create data loader for validation with full batch size.
-    # create_data_objects returns Tuples
+    # Create data iterator for train (Only source as no target/shared)
+    # second return value is None as we do not have a shared dataset
+    # Based on split_source use entire source dataset for training or only the train part
+    train_source_iter, _ = create_data_objects(args=args, 
+                                               batch_size=args.batch_size,
+                                               phase='train',
+                                               device=device,
+                                               collate_fn=collate_fn,
+                                               descriptor=total_descriptor,
+                                               split=args.split_data)
+    # Create data loader for validation
     # Use dataset descriptor from train_source_iter (which is the total dataset) for validation
     # Instead of directly using total_descriptor this ensures that even if descriptor is constructed later it is correct
     val_loader : DataLoader = create_data_objects(args=args, 
@@ -120,24 +119,18 @@ def main(args):
                                                   collate_fn=collate_fn,
                                                   descriptor=train_source_iter.dataset_descriptor,
                                                   include_source_val_test=args.include_source_eval,
-                                                  )[0]
-    # Use batch sizes of the iter objects instead of bs 
-    # because if --ensure-domain-balance is set the batch size might be different
-    if train_source_iter.batch_size != train_target_iter.batch_size:
-        args.classifier_kwargs['auto_split_indices'] = train_source_iter.batch_size
-    # Generate images for from dataloader
-    # utils.get_images_dataset(train_source_iter, 5, osp.join(logger.out_dir, 'data_images'))
-    
-    num_classes = np.array([train_source_iter.num_classes, train_target_iter.num_classes])
-    num_inputs = len(args.source) + len(args.target_shared)
-    if num_inputs > 2:
-        warnings.warn(f"Number of inputs ({num_inputs}) is greater than 2. Clipping to 2.")
-        num_inputs = 2
+                                                  novel_key='target',
+                                                  split=args.split_data)[0]
+    num_classes = np.array([train_source_iter.num_classes])
+    num_inputs = len(args.source)
+    if num_inputs > 1:
+        warnings.warn(f"Number of inputs ({num_inputs}) is greater than 1. Clipping to 1.")
+        num_inputs = 1
         
     # Set iters_per_it dynamically if not set via argument
     # See every sample at least iters-auto-scale times per epoch
     if args.iters_per_epoch is None:
-        args.iters_per_epoch = args.iters_auto_scale*max(len(train_source_iter), len(train_target_iter))
+        args.iters_per_epoch = args.iters_auto_scale*len(train_source_iter)
     print(f"Iters per Epoch: {args.iters_per_epoch}")
         
     # Set model_type based on args.method
@@ -162,26 +155,16 @@ def main(args):
     # Setup amp for mixed precision training
     amp_autocast, loss_scaler = utils.setup_amp(args=args, device=device)
     
-    # utils.preview_lr_schedule(lr_scheduler)
-    
-    # Get classes for target_novel domain for evaluation
-    # Dataset in the val_loader consists of (source), (target_shared) and target_novel (i.e. is a ConcatDataset)
-    # The last dataset in the val_loader is the target_novel dataset 
-    # Use property in wrapper around ConcatDataset (datasets.py) to get number of classes
-    # In case we don't have a ConcatDataset, the CustomDataset still has the property
-    # eval_classes = val_loader.dataset.eval_classes
-    
     # Create optimization object for training and validation
     optim = get_optim(method=args.method,
                       train_source_iter=train_source_iter,
-                      train_target_iter=train_target_iter,
                       val_loader=val_loader,
                       model=model,
                       device=device,
                       args=args,
                       logger=logger,
                       eval_classes=eval_classes,
-                      grad_accum_steps=args.grad_accum_steps,
+                      grad_accum_steps=getattr(args, 'grad_accum_steps', 1),
                       mixup_fn=mixup_fn,
                       loss_scaler=loss_scaler,
                       amp_autocast=amp_autocast,
@@ -205,7 +188,9 @@ def main(args):
                                       device=device,
                                       collate_fn=collate_fn,
                                       descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=False)[0]
+                                      include_source_val_test=False,
+                                      novel_key='target',
+                                      split=args.split_data)[0]
     runner = Validator(model=model, 
                         device=device, 
                         batch_size=args.batch_size, 
@@ -232,7 +217,9 @@ def main(args):
                                       device=device,
                                       collate_fn=collate_fn,
                                       descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=True)[0]
+                                      include_source_val_test=True,
+                                      novel_key='target',
+                                      split=args.split_data)[0]
     runner.dataloader = test_loader
     runner.result_suffix = 'TargetSource'
     test_metrics = runner.run("Target+Source")
@@ -240,7 +227,6 @@ def main(args):
                                             metrics=test_metrics, 
                                             root=logger.out_dir,
                                             write_header=True)
-    
     for add_test_desc_name in args.additional_test_desc:
         print(f'Additional Test Evaluation using {add_test_desc_name}')
         additional_test_desc = build_descriptor(fileRoot=args.root, fName=add_test_desc_name, ds_split=args.ds_split, level_names=['make', 'model'])
@@ -286,7 +272,6 @@ def main(args):
                                                 metrics=test_metrics, 
                                                 root=logger.out_dir,
                                                 write_header=True)
-    
     if args.create_excel:
         filewriter.convert_csv_to_excel(csv_summary)
     acc1 = optim.cls_acc_1
@@ -311,8 +296,7 @@ if __name__ == '__main__':
     group.add_argument('-d', '--data', metavar='DATA', choices=get_dataset_names(),
                         help='dataset: ' + ' | '.join(get_dataset_names()))
     group.add_argument('-s', '--source', help='source domain(s)', nargs='+')
-    group.add_argument('-ts', '--target-shared', help='shared target domain(s) with labeled data', nargs='+')
-    group.add_argument('-tn', '--target-novel', help='novel data for target domain(s)', nargs='+')
+    group.add_argument('-t', '--target', help='novel data for target domain(s)', nargs='+')
     group.add_argument('--ds-split', type=str, default=None,
                        help='Which split of the dataset should be used. Gets appended to annfile dir. Default None.')
     group.add_argument('-cp', '--checkpoint', type=str, 
@@ -321,6 +305,8 @@ if __name__ == '__main__':
                        help='Directory where checkpoints are stored. Default: checkpoints')
     group.add_argument('--infer-all-class-levels', action='store_true',
                        help='Infer classes of all hierarchy levels from the dataset. Default: False')
+    group.add_argument('--split-data', action='store_true',
+                       help='Split data (source and target domain) into train/val/test. Default: False')
     
     # Data Loader
     group = parser.add_argument_group('Dataloader')
@@ -403,27 +389,11 @@ if __name__ == '__main__':
                        help="Type of head used for classification using Custom Model. Default SimpleHead")
     group.add_argument('--classifier-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
     group.add_argument('--model-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
-    group.add_argument('--normalize-weights', action='store_true', default=None,
-                       help='Normalize the weights for the hierarchical loss i.e. sum to 1.')
-    group.add_argument('--hierarchy-weights', type=float, nargs='+',
-                       help='Fixed weights for each level in the hierarchy if weighted loss is used.')
-    group.add_argument('--initial-weights', type=float, nargs='+',
-                       help='Initial weights for each level in the hierarchy if dynamic weighted loss is used. '
-                       'If a single value is provided other levels are inferred to add up to 1.')
-    group.add_argument('--final-weights', type=float, nargs='+',
-                       help='Final weights for each level in the hierarchy if dynamic weighted loss is used. '
-                       'If a single value is provided other levels are inferred to add up to 1.')
-    group.add_argument('--max-mixing-epochs', type=float, nargs='+',
-                       help='Number of epochs until final mixing weight is reached for each level in the hierarchy if dynamic weighted loss is used. '
-                       'If a single value is provided it is used for all levels.')
-    group.add_argument('--max-mixing-steps', type=float, nargs='+',
-                       help='Number of iterations until final mixing weight is reached for each level in the hierarchy if dynamic weighted loss is used. '
-                       'If a single value is provided it is used for all levels.')
     group.add_argument('--freeze-backbone', type=int, default=None, const=0, nargs='?', 
                         help='Freeze backbone for first N layers. '
                         'If no number (or 0) specified freeze all layers. '
                         'If not specified do not freeze any layers.')
-    group.add_argument('--method', type=str, default='base',
+    group.add_argument('--method', type=str, default='erm',
                         help='Method for domain adaptation. Default: base '
                         'Available: ' + ','.join(METHOD_MODEL_MAP.keys()))
     group.add_argument('--optim-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
@@ -438,8 +408,6 @@ if __name__ == '__main__':
     group.add_argument("--batch-split-ratio", type=float, default=0.5,
                        help="Ratio of batch size of source and target domain. "
                        "Value represents source ratio. Remainder is for target shared. Default 0.5")
-    group.add_argument('--ensure-domain-balance', action='store_true',
-                       help='Ensure that during train the number of samples from each domain is balanced per batch.')
     group.add_argument('--epochs', default=20, type=int, metavar='N',
                         help='number of total epochs to run')
     group.add_argument('-i', '--iters-per-epoch', default=None, type=int,

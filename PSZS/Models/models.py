@@ -237,6 +237,38 @@ def build_model(backbone: torch.nn.Module,
         opt_kwargs = optimizer_kwargs(cfg=args)
         sched_kwargs = scheduler_kwargs(cfg=args)
         sched_kwargs.update({'updates_per_epoch':args.iters_per_epoch})
+        
+        hierarchy_weights_args = getattr(args, 'hierarchy_weights', None)
+        initial_weights_args = getattr(args, 'initial_weights', None)
+        final_weights_args = getattr(args, 'final_weights', None)
+        max_mixing_steps_args = getattr(args, 'max_mixing_steps', None)
+        normalize_weights_args = getattr(args, 'normalize_weights', None)
+        
+        if hierarchy_weights_args is not None:
+            if model_and_classifier_kwargs.get('hierarchy_weights', None) is not None:
+                print(f'Overwriting hierarchy_weights from kwargs {model_and_classifier_kwargs["hierarchy_weights"]} '
+                      f'with value from --hierarchy-weights {hierarchy_weights_args}.')
+            model_and_classifier_kwargs['hierarchy_weights'] = hierarchy_weights_args
+        if initial_weights_args is not None:
+            if model_and_classifier_kwargs.get('initial_weights', None) is not None:
+                print(f'Overwriting initial_weights from kwargs {model_and_classifier_kwargs["initial_weights"]} '
+                      f'with value from --initial-weights {initial_weights_args}.')
+            model_and_classifier_kwargs['initial_weights'] = initial_weights_args
+        if final_weights_args is not None:
+            if model_and_classifier_kwargs.get('final_weights', None) is not None:
+                print(f'Overwriting final_weights from kwargs {model_and_classifier_kwargs["final_weights"]} '
+                      f'with value from --final-weights {final_weights_args}.')
+            model_and_classifier_kwargs['final_weights'] = final_weights_args
+        if max_mixing_steps_args is not None:
+            if model_and_classifier_kwargs.get('max_mixing_steps', None) is not None:
+                print(f'Overwriting max_mixing_steps from kwargs {model_and_classifier_kwargs["max_mixing_steps"]} '
+                      f'with value from --max-mixing-steps {max_mixing_steps_args}.')
+            model_and_classifier_kwargs['max_mixing_steps'] = max_mixing_steps_args
+        if normalize_weights_args is not None:
+            if model_and_classifier_kwargs.get('normalize_weights', None) is not None:
+                print(f'Overwriting normalize_weights from kwargs {model_and_classifier_kwargs["normalize_weights"]} '
+                      f'with value from --normalize-weights {normalize_weights_args}.')
+            model_and_classifier_kwargs['normalize_weights'] = normalize_weights_args
     else:
         opt_kwargs = {}
         sched_kwargs = {}
