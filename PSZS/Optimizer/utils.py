@@ -2,7 +2,7 @@
 # see https://stackoverflow.com/questions/39740632/python-type-hinting-without-cyclic-imports
 from __future__ import annotations 
 from contextlib import suppress
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union, Sequence
+from typing import TYPE_CHECKING, Callable, Optional, Union, Sequence
 
 from PSZS.Utils.dataloader import ForeverDataIterator
 from PSZS.Utils.io.logger import Logger
@@ -25,11 +25,13 @@ def _get_optim_single(method:str,
                       device: torch.device,
                       args: Namespace,
                       logger: Logger,
-                      eval_classes: Iterable[int],
+                      eval_classes: Sequence[int | Sequence[int]],
                       grad_accum_steps: int = 1,
                       mixup_fn: Optional[Callable] = None,
                       loss_scaler: Optional[torch.cuda.amp.GradScaler] = None,
                       amp_autocast = suppress,
+                      eval_groups_names: Optional[Sequence[str]] = None, 
+                      additional_eval_group_classes: Optional[Sequence[int] | Sequence[Sequence[int]]] = None,
                       **optim_kwargs) -> Base_Single:
     method = method.lower()
     assert method == 'erm', f"Only Method erm supported for single source domain but got {method}"
@@ -56,6 +58,8 @@ def _get_optim_single(method:str,
                        num_epochs=args.epochs,
                        logger=logger,
                        create_class_summary=args.create_class_summary,
+                       eval_groups_names=eval_groups_names,
+                       additional_eval_group_classes=additional_eval_group_classes,
                        **optim_params)
     return optim
     
@@ -67,12 +71,14 @@ def _get_optim_multiple(method:str,
                         device: torch.device,
                         args: Namespace,
                         logger: Logger,
-                        eval_classes: Iterable[int],
+                        eval_classes: Sequence[int | Sequence[int]],
                         grad_accum_steps: int = 1,
                         mixup_fn: Optional[Callable] = None,
                         loss_scaler: Optional[torch.cuda.amp.GradScaler] = None,
                         amp_autocast = suppress,
                         iter_names: Optional[Sequence[str]]=None,
+                        eval_groups_names: Optional[Sequence[str]] = None, 
+                        additional_eval_group_classes: Optional[Sequence[int] | Sequence[Sequence[int]]] = None,
                         **optim_kwargs) -> Base_Multiple:
     # No need to check if method is supported since this is already checked when 
     # constructing `model` in build_model() in PSZS.Models.models.py
@@ -131,6 +137,8 @@ def _get_optim_multiple(method:str,
                             num_epochs=args.epochs,
                             logger=logger,
                             create_class_summary=args.create_class_summary,
+                            eval_groups_names=eval_groups_names,
+                            additional_eval_group_classes=additional_eval_group_classes,
                             **optim_params)
     return optim
 
@@ -141,13 +149,15 @@ def get_optim(method:str,
               device: torch.device,
               args: Namespace,
               logger: Logger,
-              eval_classes: Iterable[int],
+              eval_classes: Sequence[int | Sequence[int]],
               train_target_iter: Optional[ForeverDataIterator]=None,
               grad_accum_steps: int = 1,
               mixup_fn: Optional[Callable] = None,
               loss_scaler: Optional[torch.cuda.amp.GradScaler] = None,
               amp_autocast = suppress,
               iter_names: Optional[Sequence[str]]=None,
+              eval_groups_names: Optional[Sequence[str]] = None, 
+              additional_eval_group_classes: Optional[Sequence[int] | Sequence[Sequence[int]]] = None,
               **optim_kwargs) -> Base_Single | Base_Multiple:
     if train_target_iter is None:
         return _get_optim_single(method=method,
@@ -162,6 +172,8 @@ def get_optim(method:str,
                                  mixup_fn=mixup_fn,
                                  loss_scaler=loss_scaler,
                                  amp_autocast=amp_autocast,
+                                 eval_groups_names=eval_groups_names,
+                                 additional_eval_group_classes=additional_eval_group_classes,
                                  **optim_kwargs)
     else:
         return _get_optim_multiple(method=method,
@@ -178,4 +190,6 @@ def get_optim(method:str,
                                    loss_scaler=loss_scaler,
                                    amp_autocast=amp_autocast,
                                    iter_names=iter_names,
+                                   eval_groups_names=eval_groups_names,
+                                   additional_eval_group_classes=additional_eval_group_classes,
                                    **optim_kwargs)

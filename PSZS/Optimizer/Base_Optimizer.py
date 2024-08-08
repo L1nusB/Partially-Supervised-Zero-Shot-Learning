@@ -36,7 +36,7 @@ class Base_Optimizer():
                  model: CustomModel, 
                  iters_per_epoch: int, 
                  batch_size: int, 
-                 eval_classes: Iterable[int],
+                 eval_classes: Sequence[int],
                  logger: Logger,
                  device: torch.device, 
                  print_freq: int = 100, 
@@ -49,6 +49,8 @@ class Base_Optimizer():
                  loss_scaler: Optional[NativeScalerMultiple] = None,
                  amp_autocast = suppress,
                  scale_loss_accum: bool = True,
+                 eval_groups_names: Optional[Sequence[str]] = None,
+                 additional_eval_group_classes: Optional[Sequence[int] | Sequence[Sequence[int]]] = None,
                  num_epochs: Optional[int] = None,
                  adaptation_filter_mode: str = 'ignore',
                  create_class_summary: bool = False,
@@ -70,7 +72,27 @@ class Base_Optimizer():
         self.epoch = 1
         self.batch_size = batch_size
         self.train_batch_sizes = self._get_train_batch_sizes()
-        self.eval_classes = eval_classes
+        self.single_eval_class = additional_eval_group_classes is None
+        # Further group names are added subsequently/or overwritten if necessary
+        self.eval_groups_names = ['novel']
+        # Ensure uniform datatype for eval_classes
+        if self.single_eval_class:
+            self.eval_classes:Sequence[Sequence[int]] = [eval_classes]
+        else:
+            # additional_eval_group_classes is already not None
+            if isinstance(additional_eval_group_classes[0], int):
+                self.eval_classes:Sequence[Sequence[int]] = [eval_classes, additional_eval_group_classes]
+            else:
+                self.eval_classes:Sequence[Sequence[int]] = [eval_classes] + additional_eval_group_classes
+            
+            if eval_groups_names is None:
+                self.eval_groups_names = self.eval_groups_names + [f'eval{i}' for i in range(len(eval_classes)-1)]
+            else:
+                # Note that if single_eval_class is True the names are ignored
+                assert self.single_eval_class or len(self.eval_classes) == len(eval_groups_names), \
+                        f"Number of eval classes ({len(self.eval_classes)}) must match the number of eval groups names ({len(eval_groups_names)})."
+                self.eval_groups_names = eval_groups_names
+            
         self.logger = logger
         self.send_to_device = send_to_device
         self.eval_during_train = eval_during_train
@@ -114,12 +136,6 @@ class Base_Optimizer():
         self.confusion_matrix = ConfusionMatrix(num_classes=self.model.classifier.effective_head_pred_size.max(),
                                                 class_names=class_names)
         
-        # Initialize internal metric values
-        self.cls_acc_1=self.cls_acc_5=self.precision=self.recall=self.f1=0
-        
-        # LR metric for update at end of each epoch
-        self.lr_scheduler_metric_epoch = self.cls_acc_1
-        
         # Set the max mixing steps to max_mixing_epochs epochs if not specified otherwise
         if getattr(self.model, 'max_mixing_steps', None) is None:
             setattr(self.model, 'max_mixing_steps', self.iters_per_epoch * max_mixing_epochs)
@@ -145,6 +161,38 @@ class Base_Optimizer():
             if arg in kwargs or arg.replace("_", "-") in kwargs:
                 dataset_kwargs[arg] = kwargs[arg]
         return dataset_kwargs
+    
+    @property
+    def cls_acc_1(self) -> Sequence[float]:
+        return [meter.get_avg() for meter in self.meters_cls_acc_1]
+    @property
+    def cls_acc_5(self) -> Sequence[float]:
+        return [meter.get_avg() for meter in self.meters_cls_acc_5]
+    @property
+    def precision(self) -> Sequence[float]:
+        return [meter.get_last() for meter in self.meters_precision]
+    @property
+    def recall(self) -> Sequence[float]:
+        return [meter.get_last() for meter in self.meters_recall]
+    @property
+    def f1(self) -> Sequence[float]:
+        return [meter.get_last() for meter in self.meters_f1]
+    
+    @property
+    def eval_acc_1(self) -> Sequence[float]:
+        return self.cls_acc_1[0]
+    @property
+    def eval_acc_5(self) -> Sequence[float]:
+        return self.cls_acc_5[0]
+    @property
+    def eval_precision(self) -> Sequence[float]:
+        return self.precision[0]
+    @property
+    def eval_recall(self) -> Sequence[float]:
+        return self.recall[0]
+    @property
+    def eval_f1(self) -> Sequence[float]:
+        return self.f1[0]
         
     @property
     def optimizers(self) -> List[torch.optim.Optimizer]:
@@ -180,6 +228,10 @@ class Base_Optimizer():
     @property
     def has_logit_loss(self) -> bool:
         return self.model.logit_loss_func is not None and self.logit_loss_weight > 0
+    
+    @property
+    def num_eval_groups(self) -> int:
+        return len(self.eval_classes)
     
     def _get_train_batch_sizes(self) -> int | List[int]:
         if isinstance(self.train_iters, ForeverDataIterator):
@@ -223,11 +275,23 @@ class Base_Optimizer():
         # Separate function to clean up the __init__ method
         self.batch_time = StatsMeter.get_stats_meter_time('Batch Time', ':5.2f')
         self.data_time = StatsMeter.get_stats_meter_time('Data Time', ':5.2f')
-        self.meter_cls_acc_1 = StatsMeter.get_stats_meter_min_max('Acc@1', ':3.2f')
-        self.meter_cls_acc_5 = StatsMeter.get_stats_meter_min_max('Acc@5', ':3.2f')
-        self.meter_precision = StatsMeter.get_average_meter('Precision', ':3.2f', include_last=True)
-        self.meter_recall = StatsMeter.get_average_meter('Recall', ':3.2f', include_last=True)
-        self.meter_f1 = StatsMeter.get_average_meter('F1', ':3.2f', include_last=True)
+        if self.single_eval_class:
+            self.meters_cls_acc_1 = [StatsMeter.get_stats_meter_min_max('Acc@1', ':3.2f')]
+            self.meters_cls_acc_5 = [StatsMeter.get_stats_meter_min_max('Acc@5', ':3.2f')]
+            self.meters_precision = [StatsMeter.get_average_meter('Precision', ':3.2f', include_last=True)]
+            self.meters_recall = [StatsMeter.get_average_meter('Recall', ':3.2f', include_last=True)]
+            self.meters_f1 = [StatsMeter.get_average_meter('F1', ':3.2f', include_last=True)]
+        else:
+            self.meters_cls_acc_1 = [StatsMeter.get_stats_meter_min_max(f'Acc@1({name})', ':3.2f') 
+                                     for name in self.eval_groups_names]
+            self.meters_cls_acc_5 = [StatsMeter.get_stats_meter_min_max(f'Acc@5({name})', ':3.2f') 
+                                     for name in self.eval_groups_names]
+            self.meters_precision = [StatsMeter.get_average_meter(f'Precision({name})', ':3.2f', include_last=True) 
+                                     for name in self.eval_groups_names]
+            self.meters_recall = [StatsMeter.get_average_meter(f'Recall({name})', ':3.2f', include_last=True) 
+                                  for name in self.eval_groups_names]
+            self.meters_f1 = [StatsMeter.get_average_meter(f'F1({name})', ':3.2f', include_last=True) 
+                              for name in self.eval_groups_names]
         
         self.meter_feature_loss = StatsMeter.get_stats_meter_min_max('Feature Loss', fmt=":3.2f",)
         self.meter_logit_loss = StatsMeter.get_stats_meter_min_max('Logit Loss', fmt=":3.2f",)
@@ -239,13 +303,15 @@ class Base_Optimizer():
         .. note::
             No direct usage in Base_Optimizer as this is only a helper function for derived classes.
             See `Base_Multiple.py` for an example of usage."""
-        meters = [self.meter_cls_acc_1, self.meter_f1]
+        meters = self.meters_cls_acc_1
         if 'acc@5' in self.eval_metrics:
-            meters.append(self.meter_cls_acc_5)
+            meters.extend(self.meters_cls_acc_5)
         if 'precision' in self.eval_metrics:
-            meters.append(self.meter_precision)
+            meters.extend(self.meters_precision)
         if 'recall' in self.eval_metrics:
-            meters.append(self.meter_recall)
+            meters.extend(self.meters_recall)
+        # Only added later for better display order
+        meters.extend(self.meters_f1)
         return meters
     
     ######### Progress Bars #########  
@@ -497,26 +563,24 @@ class Base_Optimizer():
     def _lr_scheduler_step(self) -> None:
         """Perform a step of all learning rate schedulers."""
         for lr_scheduler in self.lr_schedulers:
-            lr_scheduler.step(epoch=self.epoch, metric=self.lr_scheduler_metric_epoch)
+            lr_scheduler.step(epoch=self.epoch)
     
     ######### Evaluation/Metric display, filtering and storage ######### 
     # "Non-private" as this could be useful to be called from the outside
     def get_metrics_str(self) -> str:
-        """Constructs a string displaying the values of the current evaluation metrics.
+        """Constructs a string displaying the values of the current evaluation metrics for the novel classes.
         E.g. Acc@1: 0.13 | F1: 0.09 | Acc@5: 0.93
         Typically called at the end of a validation run to display the results."""
-        metrics = [f'Acc@1: {self.cls_acc_1:3.2f}', f'F1: {self.f1:3.2f}']
+        metrics = [f'Acc@1: {self.eval_acc_1:3.2f}']
         if 'acc@5' in self.eval_metrics:
-            metrics.append(f'Acc@5: {self.cls_acc_5:3.2f}')
+            metrics.append(f'Acc@5: {self.eval_acc_5:3.2f}')
         if 'precision' in self.eval_metrics:
-            metrics.append(f'Precision: {self.precision:3.2f}')
+            metrics.append(f'Precision: {self.eval_precision:3.2f}')
         if 'recall' in self.eval_metrics:
-            metrics.append(f'Recall: {self.recall:3.2f}')
+            metrics.append(f'Recall: {self.eval_recall:3.2f}')
+        # Add F1 last for consistent display
+        metrics.append(f'F1: {self.eval_f1:3.2f}')
         return " | ".join(metrics)
-    
-    def _set_eval_results(self) -> None:
-        """Stores the current evaluation metrics in the class variables."""
-        raise NotImplementedError
     
     def _get_val_results(self) -> OrderedDict:
         """Gets the current evaluation metrics for all `self.eval_metrics` metrics."""
@@ -558,7 +622,7 @@ class Base_Optimizer():
                             current_best=best_acc1,
                             save_val_test=False)
             
-            best_acc1 = max(self.cls_acc_1, best_acc1)
+            best_acc1 = max(self.eval_acc_1, best_acc1)
             filewriter.update_summary(epoch=epoch+start_epoch, 
                                       metrics=metrics, 
                                       root=self.logger.out_dir,
@@ -740,7 +804,7 @@ class Base_Optimizer():
         # Display last results in progress bar
         self.progress_bar_val.display(self.epoch_length_val)
         # Epoch gets increased externally (e.g. in process_epoch)
-        self._set_eval_results()
+        # self._set_eval_results() # Not needed as we have the properties for the metrics
         # Display final metrics
         print(self.get_metrics_str())
         print(f'{phase} took: {time.time() - val_start_time}')

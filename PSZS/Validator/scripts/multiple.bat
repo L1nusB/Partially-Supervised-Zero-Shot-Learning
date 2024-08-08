@@ -1,0 +1,1 @@
+c:/Users/Linus/anaconda3/envs/Master/python.exe C:/Users/Linus/Desktop/Master/CodeBase/PSZS/Baseline/validationScriptMultiple.py Datasets/CompCars -cf config.json --in-dir C:/Users/Linus/Desktop/noCheck/checkpoints/baselineSourceOnly -cp best --eval-groups novel target -kod --test-desc descriptor_total.txt descriptor_novel.txt

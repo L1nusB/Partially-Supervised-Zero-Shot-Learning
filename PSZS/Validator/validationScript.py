@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from timm.data import resolve_data_config
 
 from PSZS.Utils.io.logger import Logger
-from PSZS.datasets.datasets import build_remapped_descriptors, get_dataset_names
+from PSZS.datasets.datasets import build_remapped_descriptors, get_dataset_names, build_descriptor
 from PSZS.Utils.data import create_data_objects
 from PSZS.Utils.io import filewriter
 from PSZS.Models import *
@@ -58,6 +58,7 @@ def main(args):
         cudnn.benchmark = False
         
     args.amp = not args.no_amp
+    args.eval_base = not args.no_base_eval
         
     # Setup amp for mixed precision training
     amp_autocast, loss_scaler = setup_amp(args=args, device=device)
@@ -76,11 +77,18 @@ def main(args):
         args.resize_size = data_config['input_size'][-1]
     
     # Construct and remap dataset descriptors
-    total_descriptor, _, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, 
+    total_descriptor, shared_descriptor, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, 
                                                                        ds_split=args.ds_split,
                                                                        level_names=['make', 'model'])
     
-    eval_classes = list(novel_descriptor.targetIDs[-1])    
+    eval_classes = list(novel_descriptor.targetIDs[-1])
+    base_classes = list(shared_descriptor.targetIDs[-1])
+    
+    if len(args.test_desc) > 0:
+       eval_classes = [(desc_name, list(build_descriptor(fileRoot=args.root, fName=desc_name, ds_split=args.ds_split).targetIDs[-1])) 
+                       for desc_name in args.test_desc]
+    else:
+        eval_classes = [('novel_vanilla',eval_classes)]
         
     # Create test data loader object
     print(f"Batch size: {args.batch_size}")
@@ -108,15 +116,6 @@ def main(args):
     # Set iters_per_epoch based on dataset
     args.iters_per_epoch = len(test_loader)
     print(f"Iters per Epoch: {args.iters_per_epoch}")
-    
-    # Get classes for target_novel domain for evaluation
-    # Dataset in the val_loader consists of (source), (target_shared) and target_novel (i.e. is a ConcatDataset)
-    # The last dataset in the val_loader is the target_novel dataset 
-    # Use property in wrapper around ConcatDataset (datasets.py) to get number of classes
-    # if isinstance(test_loader.dataset, ConcatDataset):
-    #     eval_classes = list(test_loader.dataset.datasets[-1].class_idx_name_map.keys())
-    # else:
-    #     eval_classes = list(test_loader.dataset.class_idx_name_map.keys())
         
     # Create model (classifier head)
     # For validation set method to val which is currently transformed to erm
@@ -129,160 +128,165 @@ def main(args):
                         **getattr(args, 'method_kwargs', {}),
                         **getattr(args, 'classifier_kwargs', {}))
     
-    # Load checkpoint
-    print(f"Loading checkpoint {args.checkpoint}")
-    # For validation strict is required to ensure all keys are present
-    load_checkpoint(model, 
-                    checkpoint_path=args.checkpoint,
-                    checkpoint_dir=args.checkpoint_dir,)
-    runner = Validator(model=model, 
-                        device=device, 
-                        batch_size=args.batch_size, 
-                        eval_classes=eval_classes,
-                        logger=logger,
-                        metrics=['acc@1', 'f1'] + args.metrics,
-                        dataloader=test_loader,
-                        send_to_device=args.no_prefetch,
-                        print_freq=args.print_freq,
-                        loss_scaler=loss_scaler,
-                        amp_autocast=amp_autocast,)
     
-    print("Start validation")
-    start_time = time.time()
-    # First test_loader object is constructed on only novel set
-    if 'novel' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on only novel set")
-        runner.result_suffix = 'Novel'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'shared' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on only shared set")
-        args.tasks = args.target_shared
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'Shared'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'target' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on target (novel and shared) set")
-        args.tasks = args.target_shared + args.target_novel
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'Target'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'source' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on source set")
-        args.tasks = args.source
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'Source'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'sourceNovel' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on only novel and source set")
-        args.tasks = args.source + args.target_novel
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'NovelSource'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'sourceShared' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on only Shared and source set")
-        args.tasks = args.source + args.target_novel
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'SharedSource'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
-    if 'full' in args.eval_groups or 'all' in args.eval_groups:
-        print("Validation on only novel, shared, and source set")
-        args.tasks = args.source + args.target_shared + args.target_novel
-        test_loader : DataLoader = create_data_objects(args=args, 
-                                                        batch_size=args.batch_size,
-                                                        phase='custom_test',
-                                                        device=device,
-                                                        descriptor=total_descriptor,) 
-        runner.dataloader = test_loader
-        runner.result_suffix = 'All'
-        metrics = runner.run()
-        csv_summary = filewriter.update_summary(epoch='Test Novel+Shared+Source', 
-                                                metrics=metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                             dir=logger.out_dir,)
-        runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                             dir=logger.out_dir,
-                                             start_class=-len(eval_classes),)
+    for desc_name, e_classes in eval_classes:
+        print(f'Starting evaluation for descriptor: {desc_name}')
+        # Load checkpoint
+        print(f"Loading checkpoint {args.checkpoint}")
+        # For validation strict is required to ensure all keys are present
+        load_checkpoint(model, 
+                        checkpoint_path=args.checkpoint,
+                        checkpoint_dir=args.checkpoint_dir,)
+        runner = Validator(model=model, 
+                            device=device, 
+                            batch_size=args.batch_size, 
+                            eval_classes=e_classes,
+                            additional_eval_group_classes=base_classes if args.eval_base else None,
+                            eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
+                            logger=logger,
+                            metrics=['acc@1', 'f1'] + args.metrics,
+                            dataloader=test_loader,
+                            send_to_device=args.no_prefetch,
+                            print_freq=args.print_freq,
+                            loss_scaler=loss_scaler,
+                            amp_autocast=amp_autocast,)
+        
+        print("Start validation")
+        start_time = time.time()
+        # First test_loader object is constructed on only novel set
+        if 'novel' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only novel set")
+            runner.result_suffix = 'Novel'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'shared' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only shared set")
+            args.tasks = args.target_shared
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'Shared'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'target' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on target (novel and shared) set")
+            args.tasks = args.target_shared + args.target_novel
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'Target'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'source' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on source set")
+            args.tasks = args.source
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'Source'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'sourceNovel' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only novel and source set")
+            args.tasks = args.source + args.target_novel
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'NovelSource'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'sourceShared' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only Shared and source set")
+            args.tasks = args.source + args.target_novel
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'SharedSource'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
+        if 'full' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only novel, shared, and source set")
+            args.tasks = args.source + args.target_shared + args.target_novel
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,) 
+            runner.dataloader = test_loader
+            runner.result_suffix = 'All'
+            metrics = runner.run()
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared+Source', 
+                                                    metrics=metrics, 
+                                                    root=logger.out_dir,
+                                                    write_header=True)
+            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
+                                                dir=logger.out_dir,)
+            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
+                                                dir=logger.out_dir,
+                                                start_class=-len(e_classes),)
     if args.create_excel:
         filewriter.convert_csv_to_excel(csv_summary)
     print(f"Validation completed in {time.time()-start_time:.2f} seconds")
@@ -376,6 +380,10 @@ if __name__ == '__main__':
                        "novel, shared, target, source, sourceNovel, sourceShared, full, all",
                        choices=['novel', 'shared', 'target', 'source', 'sourceNovel', 'sourceShared', 
                                 'full', 'all'])
+    group.add_argument('--test-desc', type=str, nargs='*',
+                       help='Descriptor files to evaluate on. If not specified uses base novel descriptor.')
+    group.add_argument('--no-base-eval', action='store_true',
+                       help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
     
     # Logging and checkpoints
     group = parser.add_argument_group('Logging and Checkpoints')

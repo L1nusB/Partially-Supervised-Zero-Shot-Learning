@@ -60,6 +60,7 @@ def main(args):
     if args.include_source_eval and args.split_source==False:
         warnings.warn("Source evaluation is enabled but source domain is not split for training.")
 
+    args.eval_base = not args.no_base_eval
 
     print(args)
     
@@ -94,10 +95,10 @@ def main(args):
     
     # Construct and remap dataset descriptors (No Shared dataset)
     total_descriptor, novel_descriptor = build_descriptors(fileRoot=args.root, 
-                                                           ds_split=args.ds_split,
-                                                           level_names=['make', 'model'])
+                                                           ds_split=args.ds_split,)
     
     eval_classes = list(novel_descriptor.targetIDs[-1])
+    base_classes = [i for i in list(total_descriptor.targetIDs[-1]) if i not in eval_classes]
     
     # Create data iterator for train (Only source as no target/shared)
     # second return value is None as we do not have a shared dataset
@@ -169,6 +170,8 @@ def main(args):
                       loss_scaler=loss_scaler,
                       amp_autocast=amp_autocast,
                       iter_names=None,
+                      eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
+                      additional_eval_group_classes=base_classes if args.eval_base else None,
                       **args.optim_kwargs)
     
     # Only save args here because it can be modified until now
@@ -195,6 +198,8 @@ def main(args):
                         device=device, 
                         batch_size=args.batch_size, 
                         eval_classes=eval_classes,
+                        additional_eval_group_classes=base_classes if args.eval_base else None,
+                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
                         logger=logger,
                         metrics=['acc@1', 'f1'] + args.metrics,
                         dataloader=test_loader,
@@ -227,10 +232,14 @@ def main(args):
                                             metrics=test_metrics, 
                                             root=logger.out_dir,
                                             write_header=True)
-    for add_test_desc_name in args.additional_test_desc:
+    # Default value from args is None (which is non Iterable)
+    add_test_desc = getattr(args, 'additional_test_desc', [])
+    add_test_desc = [] if add_test_desc is None else add_test_desc
+    for add_test_desc_name in add_test_desc:
         print(f'Additional Test Evaluation using {add_test_desc_name}')
-        additional_test_desc = build_descriptor(fileRoot=args.root, fName=add_test_desc_name, ds_split=args.ds_split, level_names=['make', 'model'])
-        eval_classes = [i for i in eval_classes if i in additional_test_desc.targetIDs[-1]]
+        additional_test_desc = build_descriptor(fileRoot=args.root, fName=add_test_desc_name, ds_split=args.ds_split)
+        # eval_classes = [i for i in eval_classes if i in additional_test_desc.targetIDs[-1]]
+        eval_classes = list(additional_test_desc.targetIDs[-1])
         test_loader = create_data_objects(args=args, 
                                       batch_size=args.batch_size,
                                       phase='test',
@@ -242,6 +251,8 @@ def main(args):
                         device=device, 
                         batch_size=args.batch_size, 
                         eval_classes=eval_classes,
+                        additional_eval_group_classes=base_classes if args.eval_base else None,
+                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
                         logger=logger,
                         metrics=['acc@1', 'f1'] + args.metrics,
                         dataloader=test_loader,
@@ -274,8 +285,9 @@ def main(args):
                                                 write_header=True)
     if args.create_excel:
         filewriter.convert_csv_to_excel(csv_summary)
-    acc1 = optim.cls_acc_1
-    print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}")
+    acc1 = runner.eval_acc_1
+    f1 = runner.eval_f1
+    print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}, F1 on Test: {f1:3.2f}")
     print(f'Total time: {time.time() - start_time}')
     handle_aws_postprocessing(args, s3_client=s3_client, ec2_client=ec2_client)
     logger.close()
@@ -526,6 +538,8 @@ if __name__ == '__main__':
     group.add_argument('--confmat-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
     group.add_argument('--additional-test-desc', type=str, nargs='*',
                        help='Additional descriptor files to evaluate in additional test runs.')
+    group.add_argument('--no-base-eval', action='store_true',
+                       help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
     
     # Logging and checkpoints
     group = parser.add_argument_group('Logging and Checkpoints')

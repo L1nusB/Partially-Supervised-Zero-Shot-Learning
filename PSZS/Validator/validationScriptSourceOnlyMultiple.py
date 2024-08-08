@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from timm.data import resolve_data_config
 
 from PSZS.Utils.io.logger import Logger
-from PSZS.datasets.datasets import build_remapped_descriptors, get_dataset_names, build_descriptor
+from PSZS.datasets.datasets import build_descriptors, get_dataset_names, build_descriptor
 from PSZS.Utils.data import create_data_objects
 from PSZS.Utils.io import filewriter
 from PSZS.Models import *
@@ -76,11 +76,11 @@ def main(args):
         # --> Maybe once we can remove that part we can just keep it as the full entry
         args.resize_size = data_config['input_size'][-1]
     
-    # Construct and remap dataset descriptors
-    total_descriptor, shared_descriptor, novel_descriptor = build_remapped_descriptors(fileRoot=args.root, ds_split=args.ds_split)
-    
+    # Construct and remap dataset descriptors (No Shared dataset)
+    total_descriptor, novel_descriptor = build_descriptors(fileRoot=args.root, 
+                                                           ds_split=args.ds_split,)
     eval_classes = list(novel_descriptor.targetIDs[-1])
-    base_classes = list(shared_descriptor.targetIDs[-1])
+    base_classes = [i for i in list(total_descriptor.targetIDs[-1]) if i not in eval_classes]
     
     if len(args.test_desc) > 0:
        eval_classes = [(desc_name, list(build_descriptor(fileRoot=args.root, fName=desc_name, ds_split=args.ds_split).targetIDs[-1])) 
@@ -90,9 +90,9 @@ def main(args):
         
     # Create test data loader object
     print(f"Batch size: {args.batch_size}")
-    # If no explicit task from user, use target_novel as tasks
+    # If no explicit task from user, use target as tasks
     if args.tasks is None:
-        args.tasks = getattr(args, 'target_novel', getattr(args, 'target'))
+        args.tasks = args.target
         assert args.tasks is not None, "No tasks specified for evaluation."
         
     test_loader : DataLoader = create_data_objects(args=args, 
@@ -117,15 +117,6 @@ def main(args):
     # Set iters_per_epoch based on dataset
     args.iters_per_epoch = len(test_loader)
     print(f"Iters per Epoch: {args.iters_per_epoch}")
-    
-    # Get classes for target_novel domain for evaluation
-    # Dataset in the val_loader consists of (source), (target_shared) and target_novel (i.e. is a ConcatDataset)
-    # The last dataset in the val_loader is the target_novel dataset 
-    # Use property in wrapper around ConcatDataset (datasets.py) to get number of classes
-    # if isinstance(test_loader.dataset, ConcatDataset):
-    #     eval_classes = list(test_loader.dataset.datasets[-1].class_idx_name_map.keys())
-    # else:
-    #     eval_classes = list(test_loader.dataset.class_idx_name_map.keys())
         
     # Create model (classifier head)
     # For validation set method to val which is currently transformed to erm
@@ -166,7 +157,19 @@ def main(args):
         # First test_loader object is constructed on only novel set
         if 'novel' in args.eval_groups or 'all' in args.eval_groups:
             print("Validation on only novel set")
+            args.tasks = getattr(args, 'tasks_novel', None)
+            if args.tasks is None:
+                warnings.warn("No novel tasks specified. Using target tasks for evaluation in 'novel'.")
+                args.tasks = args.target
+            test_loader : DataLoader = create_data_objects(args=args, 
+                                                            batch_size=args.batch_size,
+                                                            phase='custom_test',
+                                                            device=device,
+                                                            descriptor=total_descriptor,
+                                                            split=args.split_data) 
             runner.result_suffix = 'Novel'
+            # Updates the num_iters and the progressbar
+            runner.dataloader = test_loader
             metrics = runner.run()
             csv_summary = filewriter.update_summary(epoch='Test Novel', 
                                                     metrics=metrics, 
@@ -177,9 +180,14 @@ def main(args):
             runner.confusion_matrix.update_class_summary(file='classMetricsEval',
                                                 dir=logger.out_dir,
                                                 start_class=-len(e_classes),)
-        if 'shared' in args.eval_groups or 'all' in args.eval_groups:
-            print("Validation on only shared set")
-            args.tasks = args.target_shared
+        if 'sourceNovel' in args.eval_groups or 'all' in args.eval_groups:
+            print("Validation on only novel and source set")
+            args.tasks = getattr(args, 'tasks_novel', None)
+            if args.tasks is None:
+                warnings.warn("No novel tasks specified. Using target tasks for evaluation in 'sourceNovel'.")
+                args.tasks = args.target
+            # Prepend source tasks to the tasks
+            args.tasks = args.source + args.tasks
             test_loader : DataLoader = create_data_objects(args=args, 
                                                             batch_size=args.batch_size,
                                                             phase='custom_test',
@@ -187,9 +195,11 @@ def main(args):
                                                             descriptor=total_descriptor,
                                                             split=args.split_data) 
             runner.dataloader = test_loader
-            runner.result_suffix = 'Shared'
+            runner.result_suffix = 'NovelSource'
+            # Updates the num_iters and the progressbar
+            runner.dataloader = test_loader
             metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
+            csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
                                                     metrics=metrics, 
                                                     root=logger.out_dir,
                                                     write_header=True)
@@ -199,8 +209,11 @@ def main(args):
                                                 dir=logger.out_dir,
                                                 start_class=-len(e_classes),)
         if 'target' in args.eval_groups or 'all' in args.eval_groups:
-            print("Validation on target (novel and shared) set")
-            args.tasks = args.target_shared + args.target_novel
+            print("Validation on target set")
+            args.tasks = getattr(args, 'tasks_full', None)
+            if args.tasks is None:
+                warnings.warn("No full tasks specified. Using target tasks for evaluation in 'target'.")
+                args.tasks = args.target
             test_loader : DataLoader = create_data_objects(args=args, 
                                                             batch_size=args.batch_size,
                                                             phase='custom_test',
@@ -209,8 +222,10 @@ def main(args):
                                                             split=args.split_data) 
             runner.dataloader = test_loader
             runner.result_suffix = 'Target'
+            # Updates the num_iters and the progressbar
+            runner.dataloader = test_loader
             metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
+            csv_summary = filewriter.update_summary(epoch='Test Target', 
                                                     metrics=metrics, 
                                                     root=logger.out_dir,
                                                     write_header=True)
@@ -230,50 +245,10 @@ def main(args):
                                                             split=args.split_data) 
             runner.dataloader = test_loader
             runner.result_suffix = 'Source'
-            metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared', 
-                                                    metrics=metrics, 
-                                                    root=logger.out_dir,
-                                                    write_header=True)
-            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                                dir=logger.out_dir,)
-            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                                dir=logger.out_dir,
-                                                start_class=-len(e_classes),)
-        if 'sourceNovel' in args.eval_groups or 'all' in args.eval_groups:
-            print("Validation on only novel and source set")
-            args.tasks = args.source + getattr(args, 'target_novel', getattr(args, 'target'))
-            test_loader : DataLoader = create_data_objects(args=args, 
-                                                            batch_size=args.batch_size,
-                                                            phase='custom_test',
-                                                            device=device,
-                                                            descriptor=total_descriptor,
-                                                            split=args.split_data) 
+            # Updates the num_iters and the progressbar
             runner.dataloader = test_loader
-            runner.result_suffix = 'NovelSource'
             metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
-                                                    metrics=metrics, 
-                                                    root=logger.out_dir,
-                                                    write_header=True)
-            runner.confusion_matrix.update_class_summary(file='classMetricsFull',
-                                                dir=logger.out_dir,)
-            runner.confusion_matrix.update_class_summary(file='classMetricsEval',
-                                                dir=logger.out_dir,
-                                                start_class=-len(e_classes),)
-        if 'sourceShared' in args.eval_groups or 'all' in args.eval_groups:
-            print("Validation on only Shared and source set")
-            args.tasks = args.source + getattr(args, 'target_novel', getattr(args, 'target'))
-            test_loader : DataLoader = create_data_objects(args=args, 
-                                                            batch_size=args.batch_size,
-                                                            phase='custom_test',
-                                                            device=device,
-                                                            descriptor=total_descriptor,
-                                                            split=args.split_data) 
-            runner.dataloader = test_loader
-            runner.result_suffix = 'SharedSource'
-            metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Source', 
+            csv_summary = filewriter.update_summary(epoch='Test Source', 
                                                     metrics=metrics, 
                                                     root=logger.out_dir,
                                                     write_header=True)
@@ -283,8 +258,13 @@ def main(args):
                                                 dir=logger.out_dir,
                                                 start_class=-len(e_classes),)
         if 'full' in args.eval_groups or 'all' in args.eval_groups:
-            print("Validation on only novel, shared, and source set")
-            args.tasks = args.source + args.target_shared + getattr(args, 'target_novel', getattr(args, 'target'))
+            print("Validation source + target set")
+            args.tasks = getattr(args, 'tasks_full', None)
+            if args.tasks is None:
+                warnings.warn("No full tasks specified. Using target tasks for evaluation in 'full'.")
+                args.tasks = args.target
+            # Prepend source tasks to the tasks
+            args.tasks = args.source + args.tasks
             test_loader : DataLoader = create_data_objects(args=args, 
                                                             batch_size=args.batch_size,
                                                             phase='custom_test',
@@ -293,8 +273,10 @@ def main(args):
                                                             split=args.split_data) 
             runner.dataloader = test_loader
             runner.result_suffix = 'All'
+            # Updates the num_iters and the progressbar
+            runner.dataloader = test_loader
             metrics = runner.run()
-            csv_summary = filewriter.update_summary(epoch='Test Novel+Shared+Source', 
+            csv_summary = filewriter.update_summary(epoch='Test Full', 
                                                     metrics=metrics, 
                                                     root=logger.out_dir,
                                                     write_header=True)
@@ -329,6 +311,8 @@ if __name__ == '__main__':
     group.add_argument('-d', '--data', metavar='DATA', choices=get_dataset_names(),
                         help='dataset: ' + ' | '.join(get_dataset_names()))
     group.add_argument('-t', '--tasks', help='Name of tasks to evaluate on', nargs='+')
+    group.add_argument('-tNovel', '--tasks-novel', help='Name of novel tasks to evaluate on. Defaults to --tasks if not specified', nargs='+')
+    group.add_argument('-tFull', '--tasks-full', help='Name of full tasks to evaluate on. Defaults to --tasks if not specified', nargs='+')
     group.add_argument('-cp', '--checkpoint', type=str, 
                        help='Checkpoint to evaluate. Either absolute path or relative to --in-dir.')
     group.add_argument('--checkpoint-dir', type=str, default="checkpoints",
@@ -463,15 +447,13 @@ if __name__ == '__main__':
             args.ratio = [3. / 4., 4. / 3.]
             args.norm_mean = (0.485, 0.456, 0.406)
             args.norm_std = (0.229, 0.224, 0.225)
-            args.target_shared = None
             assert args.tasks is not None, "No tasks or config file specified."
-            args.target_novel = args.tasks
+            args.target = args.tasks
             args.eval_train = False
             args.mixup_off_epoch = 0
             args.no_scale_acum = False
-        # Overwrite the target_novel and target from config with tasks if tasks are specified
+        # Overwrite the target from config with tasks if tasks are specified
         if args.tasks is not None:
-            setattr(args, 'target_novel', args.tasks)
-            setattr(args, 'target', args.tasks) # For source only runs
+            setattr(args, 'target', args.tasks)
         
         main(args)

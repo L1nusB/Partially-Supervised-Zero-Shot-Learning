@@ -66,17 +66,15 @@ def save_checkpoint(model: CustomModel,
         torch.save(model.val_test_state_dict(), logger.get_checkpoint_path('latest_val_test'))
     match metric:
         case 'acc1':
-            cur_val = optimizer.cls_acc_1
+            cur_val = optimizer.eval_acc_1
         case 'acc5':
-            cur_val = optimizer.cls_acc_5
+            cur_val = optimizer.eval_acc_5
         case 'f1':
-            cur_val = optimizer.f1
-        case 'f1_5':
-            cur_val = optimizer.f1_5
+            cur_val = optimizer.eval_f1
         case 'precision':
-            cur_val = optimizer.precision
+            cur_val = optimizer.eval_precision
         case 'recall':
-            cur_val = optimizer.recall
+            cur_val = optimizer.eval_recall
         case '_':
             raise ValueError(f'Metric {metric} not supported.')
     # Save best model

@@ -1,9 +1,7 @@
 import time
 
-from typing import Iterable, List, Optional, Set, Tuple, Sequence, TypeAlias, overload
+from typing import List, Optional, Tuple, Sequence, TypeAlias, overload
 from collections import OrderedDict
-import warnings
-
 
 import torch
 
@@ -12,10 +10,10 @@ from torch.utils.data import DataLoader
 
 from PSZS.Utils.meters import DynamicStatsMeter, ProgressMeter, _BaseMeter, StatsMeter
 from PSZS.Utils.dataloader import ForeverDataIterator
-from PSZS.Utils.evaluation import accuracy, accuracy_hierachy
-from PSZS.Optimizer.Base_Optimizer import Base_Optimizer, TRAIN_PRED_TYPE, LABEL_TYPE, PRED_TYPE
+from PSZS.Utils.evaluation import accuracy, accuracy_hierarchy
+from PSZS.Optimizer.Base_Optimizer import Base_Optimizer, PRED_TYPE
 from PSZS.Models import CustomModel
-from PSZS.Utils.evaluation import PrecisionRecallF1
+from PSZS.Utils.evaluation import MultiplePrecisionRecallF1, PrecisionRecallF1
 from PSZS.Utils.io.logger import Logger
 from PSZS.datasets import transform_target
 
@@ -28,22 +26,40 @@ class Base_Single(Base_Optimizer):
                  model: CustomModel, 
                  iters_per_epoch: int, 
                  batch_size: int, 
-                 eval_classes: Iterable[int],
+                 eval_classes: Sequence[int],
                  logger: Logger,
                  device: torch.device, 
                  **optim_kwargs,
                  ) -> None:
-        # TODO Use datasetdescriptor.hierarchy_level_names instead
-        self.hierachy_level_names = ['make', 'model']
+        if getattr(val_loader.dataset, 'descriptor', None) is not None:
+            self.hierarchy_level_names = val_loader.dataset.descriptor.hierarchy_level_names
+        else:
+            self.hierarchy_level_names = [f'Level{i+1}' for i in range(model.classifier.num_head_pred)]
 
+        if model.classifier.returns_multiple_outputs:
+            self.hierarchy_level = None
+        else:
+            # Generally the dataset is a Concat Dataset which has the attribute 'main_class_index'
+            # otherwise use -1 as default value
+            self.hierarchy_level = getattr(train_iter.dataset, 'main_class_index', -1)
+        # Typehint correctly for intellisense
+        self.hierarchy_level : int | None
+        # If validation dataset does not have a main_class_index attribute use the 
+        # value of the first training dataset
+        # as this corresponds to the source domain which should match the validation
+        self.hierarchy_level_val: int | None = getattr(val_loader.dataset, 'main_class_index', self.hierarchy_level)
+        # Needs to be set before calling super().__init__ (needed in _build_progress_bars)
+        self.main_metric_field = self.hierarchy_level_names[self.hierarchy_level_val]
+        
+        
         # For multiple outputs we have to watch each output separately (for losses meter during training)
         # can not use self.model as it is not yet initialized
         if model.classifier.returns_multiple_outputs:
-            lvl_names_full = [f'{lvl}' for lvl in self.hierachy_level_names]
-            total_fields_full = [f'total_{lvl}' for lvl in self.hierachy_level_names]   
+            lvl_names_full = [f'{lvl}' for lvl in self.hierarchy_level_names]
+            total_fields_full = [f'total_{lvl}' for lvl in self.hierarchy_level_names]   
             self._calculate_metrics_train = self._calculate_metrics_train_multiple_output
             # For multiple outputs we have to watch each total output separately (for losses meter during training)
-            # Can not reference self yet as super init not called
+            # For train we have no eval classes and thus MultiplePrecisionRecallF1 is not needed
             self.PrecRecF1_train_totals = [PrecisionRecallF1(num_classes=num_classes,
                                                             topk=1, device=device)
                                                 for num_classes in model.classifier.effective_head_pred_size.max(dim=0).values
@@ -54,15 +70,13 @@ class Base_Single(Base_Optimizer):
             total_fields_full = ['total']
             self._calculate_metrics_train = self._calculate_metrics_train_single_output
             # Shape of effective_head_pred_size can be ignored as it is only used for multiple outputs
+            # For train we have no eval classes and thus MultiplePrecisionRecallF1 is not needed
             self.PrecRecF1_train_totals = [PrecisionRecallF1(num_classes=model.classifier.effective_head_pred_size.max(),
                                                         topk=1, device=device)]
         
-        self.PrecRecF1_val = PrecisionRecallF1(num_classes=model.classifier.effective_head_pred_size.max(),
-                                               topk=1, device=device,
-                                               evalClasses=eval_classes)
-        
+        # Need to construct and set watched_fields_loss and watched_fields_full before calling super().__init__
+        # as they are needed in _build_progress_bars()
         self.watched_fields_full = total_fields_full + lvl_names_full
-        
         super().__init__(
             train_iters=train_iter,
             val_loader=val_loader,
@@ -75,22 +89,15 @@ class Base_Single(Base_Optimizer):
             **optim_kwargs,
         )
         
+        # Validation F1 can only be constructed after self.eval_classes is set appropriately i.e. after super().__init__
+        self.PrecRecF1_val = MultiplePrecisionRecallF1(num_classes=model.classifier.effective_head_pred_size.max(),
+                                               topk=1, device=device,
+                                               evalClasses=self.eval_classes)
+        
+        self._expand_progress_bars(train_progress=self.progress_bar_train, val_progress=self.progress_bar_val)
+        
+        
         assert self.num_inputs == 1, "Only single input/source domain supported"
-        
-        if self.multiple_outputs:
-            self.hierarchy_level = None
-        else:
-            # Generally the dataset is a Concat Dataset which has the attribute 'main_class_index'
-            # otherwise use -1 as default value
-            self.hierarchy_level = getattr(self.train_iter.dataset, 'main_class_index', -1)
-        # If validation dataset does not have a main_class_index attribute use the 
-        # value of the first training dataset
-        # as this corresponds to the source domain which should match the validation
-        self.hierarchy_level_val: int | None = getattr(self.val_loader.dataset, 'main_class_index', self.hierarchy_level)
-        self.main_metric_field = self.hierachy_level_names[self.hierarchy_level_val]
-        
-        # Typehint correctly for intellisense
-        self.hierarchy_level : int | None
         # Avoid checks on every data load call
         if self.send_to_device:
             self._load_data = self._load_data_send_to_device
@@ -121,31 +128,31 @@ class Base_Single(Base_Optimizer):
     
     ######### Progress Bars #########
     def _build_progress_bars(self) -> Tuple[ProgressMeter, ProgressMeter]:
-        train_progress, val_progress = self._build_progress_bars_base()
-        train_progress, val_progress = self._expand_progress_bars(train_progress=train_progress,
-                                                                  val_progress=val_progress)
-        return train_progress, val_progress
-            
-    def _build_progress_bars_base(self) -> Tuple[ProgressMeter, ProgressMeter]:
         self.meter_cls_loss = StatsMeter.get_stats_meter_min_max("Cls Loss", fmt=":6.2f")
         # Separate metric meters for train and validation
+        # For train we only care about the novel classes
         self.meter_cls_accs_1_train = DynamicStatsMeter.get_stats_meter_min_max("Acc@1", 
                                                                 fields=self.watched_fields_full, 
-                                                                fmt=":3.2f")
+                                                                fmt=":3.2f",
+                                                                defaultField=self.main_metric_field)
         self.meter_cls_accs_5_train = DynamicStatsMeter.get_stats_meter_min_max("Acc@5", 
                                                                 fields=self.watched_fields_full, 
-                                                                fmt=":3.2f")
+                                                                fmt=":3.2f",
+                                                                defaultField=self.main_metric_field)
         self.meter_precision_train = DynamicStatsMeter.get_average_meter("Precision", 
                                                                 fields=self.watched_fields_full, 
                                                                 fmt=":3.2f",
+                                                                defaultField=self.main_metric_field,
                                                                 include_last=True)
         self.meter_recall_train = DynamicStatsMeter.get_average_meter("Recall", 
                                                                 fields=self.watched_fields_full, 
                                                                 fmt=":3.2f",
+                                                                defaultField=self.main_metric_field,
                                                                 include_last=True)
         self.meter_f1_train = DynamicStatsMeter.get_average_meter("F1", 
                                                                 fields=self.watched_fields_full, 
                                                                 fmt=":3.2f",
+                                                                defaultField=self.main_metric_field,
                                                                 include_last=True)
         
         def _get_metric_meters_train() -> List[_BaseMeter]:
@@ -158,13 +165,28 @@ class Base_Single(Base_Optimizer):
                 meters.append(self.meter_recall_train)
             return meters
         
-        # Overwrite accuracy meters to show all hierarchy levels
-        self.meter_cls_acc_1 = DynamicStatsMeter.get_stats_meter_min_max("Acc@1", 
-                                                                fields=self.hierachy_level_names, 
-                                                                fmt=":3.2f")
-        self.meter_cls_acc_5 = DynamicStatsMeter.get_stats_meter_min_max("Acc@5", 
-                                                                fields=self.hierachy_level_names, 
-                                                                fmt=":3.2f")
+        # Overwrite accuracy meters to show all hierarchy levels (other meters are created in the base class)
+        # and only show the main hierarchy level
+        if self.single_eval_class:
+            self.meters_cls_acc_1 = [DynamicStatsMeter.get_stats_meter_min_max("Acc@1", 
+                                                                    fields=self.hierarchy_level_names, 
+                                                                    fmt=":3.2f",
+                                                                    defaultField=self.main_metric_field)]
+            self.meters_cls_acc_5 = [DynamicStatsMeter.get_stats_meter_min_max("Acc@5", 
+                                                                    fields=self.hierarchy_level_names, 
+                                                                    fmt=":3.2f",
+                                                                    defaultField=self.main_metric_field)]
+        else:
+            self.meters_cls_acc_1 = [DynamicStatsMeter.get_stats_meter_min_max(f"Acc@1({name})", 
+                                                                    fields=self.hierarchy_level_names, 
+                                                                    fmt=":3.2f",
+                                                                    defaultField=self.main_metric_field) 
+                                     for name in self.eval_groups_names]
+            self.meters_cls_acc_5 = [DynamicStatsMeter.get_stats_meter_min_max(f"Acc@5({name})", 
+                                                                    fields=self.hierarchy_level_names, 
+                                                                    fmt=":3.2f",
+                                                                    defaultField=self.main_metric_field) 
+                                     for name in self.eval_groups_names]
         
         metric_meters_train = _get_metric_meters_train()
         metric_meters_val = self._get_metric_meters()
@@ -290,7 +312,7 @@ class Base_Single(Base_Optimizer):
     def _compute_loss_cls(self, 
                           pred: SINGLE_TRAIN_PRED_TYPE, 
                           target: torch.Tensor) -> torch.Tensor:
-        loss, loss_components = self.model.compute_cls_loss(pred, target)
+        loss, _ = self.model.compute_cls_loss(pred, target)
         
         self.meter_cls_loss.update(val=loss.item(), n=self.batch_size)
         return loss
@@ -418,51 +440,60 @@ class Base_Single(Base_Optimizer):
                                   features: Optional[torch.Tensor]=None,
                                   ) -> None:
         self.confusion_matrix.update(prediction=pred, target=target)
-        cls_accs, num_relevant = accuracy_hierachy(prediction=pred, 
+        cls_accs, nums_relevant = accuracy_hierarchy(prediction=pred, 
                                                    target=target, 
                                                    hierarchy_map=self.val_descriptor.pred_fine_coarse_map,
                                                    originalTarget=og_labels,
                                                    evalClasses=self.eval_classes)
-        cls_acc_1, cls_acc_5 = zip(*cls_accs)
-
         self.PrecRecF1_val.update(prediction=pred, 
                                   target=target,)
         prec, recall, f1 = self.PrecRecF1_val.compute()
         
-        update_size = pred.size(0)
-        # Only account for relevant samples when accuracy updating meters
-        self.meter_cls_acc_1.update(vals=cls_acc_1, n=num_relevant)
-        # self.meter_cls_acc_1.update(cls_acc_1.item(), num_relevant)
-        self.meter_cls_acc_5.update(vals=cls_acc_5, n=num_relevant)
-        # self.meter_cls_acc_5.update(cls_acc_5.item(), num_relevant)
-        # For precision, recall and f1 all samples are relevant
-        self.meter_precision.update(prec.item(), update_size)
-        self.meter_recall.update(recall.item(), update_size)
-        self.meter_f1.update(f1.item(), update_size)
+        update_size = self.batch_size
+        if self.single_eval_class:
+            # Need to rewrap the results for zipping and uniform handling below
+            # somewhat unintuitive as accuracy_hierarchy specifically unpacks it
+            # but this is for allowing more flexibility of its usage
+            accs_results = zip([cls_accs], [nums_relevant])
+        else:
+            accs_results = zip(cls_accs, nums_relevant)
+
+        for eval_group, ((cls_acc_1, cls_acc_5), num_relevant) in enumerate(accs_results):
+            # Only account for relevant samples when accuracy updating meters
+            self.meters_cls_acc_1[eval_group].update(vals=cls_acc_1, n=num_relevant)
+            self.meters_cls_acc_5[eval_group].update(vals=cls_acc_5, n=num_relevant)
+            # For precision, recall and f1 all samples are relevant
+            self.meters_precision[eval_group].update(prec[eval_group].item(), update_size)
+            self.meters_recall[eval_group].update(recall[eval_group].item(), update_size)
+            self.meters_f1[eval_group].update(f1[eval_group].item(), update_size)
     
     
-    ######### Evaluation/Metric display, filtering and storage #########     
-    def _set_eval_results(self) -> None:
-        """Stores the current evaluation metrics (based on meters)
-        in the class variables."""
-        self.cls_acc_1 = self.meter_cls_acc_1.get_avg(self.main_metric_field)
-        self.cls_acc_5 = self.meter_cls_acc_5.get_avg(self.main_metric_field)
-        self.precision = self.meter_precision.get_last()
-        self.recall = self.meter_recall.get_last()
-        self.f1 = self.meter_f1.get_last()
-    
+    # ######### Evaluation/Metric display and filtering#########     
     def _get_val_results(self) -> OrderedDict:
         """Gets the current evaluation metrics for all `self.eval_metrics` 
-        from the respective internal class variables.
-        `~_set_eval_results` needs to be called before to set these values."""
-        results = OrderedDict([(f'Acc@1_{lvl}', self.meter_cls_acc_1.get_avg(lvl)) for lvl in self.hierachy_level_names])
-        results.update([('F1', self.f1)])
-        if 'acc@5' in self.eval_metrics:
-            results.update([(f'Acc@5_{lvl}', self.meter_cls_acc_5.get_avg(lvl)) for lvl in self.hierachy_level_names])
-        if 'precision' in self.eval_metrics:
-            results.update([('Precision', self.precision)])
-        if 'recall' in self.eval_metrics:
-            results.update([('Recall', self.recall)])
+        from the respective internal properties."""
+        results = OrderedDict()
+        if self.single_eval_class:
+            for lvl in self.hierarchy_level_names:
+                results.update([(f'Acc@1_{lvl}', self.meters_cls_acc_1[0].get_avg(lvl))])
+                if 'acc@5' in self.eval_metrics:
+                    results.update([(f'Acc@5_{lvl}', self.meters_cls_acc_5[0].get_avg(lvl))])
+            if 'precision' in self.eval_metrics:
+                results.update([('Precision', self.meters_precision[0].get_last())])
+            if 'recall' in self.eval_metrics:
+                results.update([('Recall', self.meters_recall[0].get_last())])
+            results.update([('F1', self.meters_f1[0].get_last())])
+        else:
+            for i, name in enumerate(self.eval_groups_names):
+                for lvl in self.hierarchy_level_names:
+                    results.update([(f'Acc@1_{lvl}({name})', self.meters_cls_acc_1[i].get_avg(lvl))])
+                    if 'acc@5' in self.eval_metrics:
+                        results.update([(f'Acc@5_{lvl}({name})', self.meters_cls_acc_5[i].get_avg(lvl))])
+                if 'precision' in self.eval_metrics:
+                    results.update([(f'Precision({name})', self.meters_precision[i].get_last())])
+                if 'recall' in self.eval_metrics:
+                    results.update([(f'Recall({name})', self.meters_recall[i].get_last())])
+                results.update([(f'F1({name})', self.meters_f1[i].get_last())])
         return results
     
     def _get_train_results(self) -> OrderedDict:

@@ -39,7 +39,7 @@ class CompCarsHierarchy(CompCars):
         # of what actually exists in the dataset
         if infer_all_classes==False:
             # Append the more granual classes as well
-            self.classes = CLASSES_LEVELS[:self.most_detailed_class] + [self.classes[self.most_detailed_class]]
+            self.classes = CLASSES_LEVELS[-self.most_detailed_class:] + [self.classes[self.most_detailed_class]]
     
     # def __getitem__(self, index: int) -> Tuple[Any, List[int]]:
     #     """

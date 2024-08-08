@@ -1,5 +1,5 @@
 
-from typing import Dict, Iterable, List, Tuple, Optional, Sequence, overload
+from typing import Dict, List, Tuple, Optional, Sequence, overload
 import warnings
 
 import numpy as np
@@ -7,7 +7,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-METRIC_RETURN_TYPE = Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]]
+F1_RETURN_TYPE = Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]]
+MULTIPLE_F1_RETURN_TYPE = Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]
 
 def to_tensor(value):
     """Convert value to torch.Tensor."""
@@ -115,6 +116,7 @@ def label_to_onehot(label: torch.Tensor|np.ndarray|Sequence|int, num_classes: in
     sparse_onehot = F.one_hot(label, num_classes)
     return sparse_onehot.sum(0)
 
+@torch.no_grad()
 def accuracy(prediction: torch.Tensor, 
              target: torch.Tensor, 
              topk: Sequence[int]=(1,5), 
@@ -146,48 +148,73 @@ def accuracy(prediction: torch.Tensor,
         Tuple[List[torch.Tensor], int]: List of accuracy values for each topk value and the number \
             of relevant classes.
     """
-    with torch.no_grad():
-        maxk = min(max(topk), prediction.size()[1])
-        _, pred = prediction.topk(maxk, 1, True, True)
-        pred = pred.t()
-        if evalClasses is None:
-            # If no classes are specified all classes are evaluated
-            # then originalClasses is irrelevant
-            relevantTargetMask = torch.ones_like(target, dtype=bool)
-        else:
-            if originalTarget is None:
-                warnings.warn('originalTarget is not specified when evalClasses given. '
-                              'Use target directly instead. '
-                              'This can cause unexpected results if target index does not '
-                              'correspond to the original class index.')
-                originalTarget = target
-            relevantTargetMask = torch.tensor([i in evalClasses for i in originalTarget])
-        # Required to only account for relevant classes when building statistics
-        num_relevant = relevantTargetMask.sum().item()
-        # If no relevant classes are present return 100% accuracy
-        # and avoid division by zero causing NaN
-        if num_relevant == 0:
-            return [torch.tensor(1)]*len(topk), 0
-        correct = pred.eq(target.reshape(1, -1).expand_as(pred))
-        relevant_correct = correct[:,relevantTargetMask]
-        return [relevant_correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / num_relevant for k in topk], num_relevant
+    maxk = min(max(topk), prediction.size()[1])
+    _, pred = prediction.topk(maxk, 1, True, True)
+    pred = pred.t()
+    if evalClasses is None:
+        # If no classes are specified all classes are evaluated
+        # then originalClasses is irrelevant
+        relevantTargetMask = torch.ones_like(target, dtype=bool)
+    else:
+        if originalTarget is None:
+            warnings.warn('originalTarget is not specified when evalClasses given. '
+                            'Use target directly instead. '
+                            'This can cause unexpected results if target index does not '
+                            'correspond to the original class index.')
+            originalTarget = target
+        # .cpu() is achieves significant speedup
+        # .detach() is not necessary as we are in no_grad anyways and does not impact performance significantly
+        # but might as well
+        relevantTargetMask = torch.tensor([i in evalClasses for i in originalTarget.detach().cpu()])
+    # Required to only account for relevant classes when building statistics
+    num_relevant = relevantTargetMask.sum().item()
+    # If no relevant classes are present return 100% accuracy
+    # and avoid division by zero causing NaN
+    if num_relevant == 0:
+        return [torch.tensor(1)]*len(topk), 0
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+    relevant_correct = correct[:,relevantTargetMask]
+    return [relevant_correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / num_relevant for k in topk], num_relevant
 
 @torch.no_grad()
-def accuracy_hierachy(prediction: torch.Tensor, 
+def accuracy_hierarchy(prediction: torch.Tensor, 
                       target: torch.Tensor, 
                       hierarchy_map: Sequence[Dict[int, int]],
-                      topk: Sequence[int]=(1,5), 
+                      topk: int | Sequence[int]=(1,5), 
                       originalTarget: Optional[torch.Tensor]=None,
                       evalClasses: Optional[Sequence[int]] = None
-                      ) -> Tuple[List[List[torch.Tensor]], int]:
-    """Computes the prediction accuracy over the specified topk values for each level of the hierarchy.
+                      ) -> Tuple[List[torch.Tensor], int]:...
+@torch.no_grad()
+def accuracy_hierarchy(prediction: torch.Tensor, 
+                      target: torch.Tensor, 
+                      hierarchy_map: Sequence[Dict[int, int]],
+                      topk: int | Sequence[int]=(1,5), 
+                      originalTarget: Optional[torch.Tensor]=None,
+                      evalClasses: Optional[Sequence[Sequence[int]]] = None
+                      ) -> Tuple[List[List[torch.Tensor]], List[int]]:...
+@torch.no_grad()
+def accuracy_hierarchy(prediction: torch.Tensor, 
+                      target: torch.Tensor, 
+                      hierarchy_map: Sequence[Dict[int, int]],
+                      topk: int | Sequence[int]=(1,5), 
+                      originalTarget: Optional[torch.Tensor]=None,
+                      evalClasses: Optional[Sequence[int] | Sequence[Sequence[int]]] = None
+                      ) -> Tuple[List[List[torch.Tensor | List[torch.Tensor]]], int | List[int]]:
+    """Computes the prediction accuracy over the specified topk values for each level of the hierarchy
+    as well as each collection of classes specified in `evalClasses`.
     The `target` is mapped using the `hierarchy_map` and the accuracy is computed for the `topk` values.
     Via `evalClasses` only a subset of classes can be evaluated. Using `originalTarget`
     the original class labels can be specified which are referenced in `evalClasses`.
     This is relevant if `target` does not correspond to the original class labels 
     e.g. if the target indices are a (remapped) subset of the original classes and thus are not a 
     continuous range that could cause wrong classes to be evaluated.
-    The number of relevant classes that were used for computing the accuracy is returned.
+    Multiple class collections can be specified in `evalClasses` to evaluate the accuracy over multiple sets of classes.
+    For each set of classes the accuracy and number of relevant classes is returned.
+    If none or only a single set of classes is specified the return values are not nested.
+    Accuracies are returned in the format: 
+    
+    `[[[eval1_lvl1_topk1, eval1_lvl1_topk2,...], [eval1_lvl2_topk1, eval1_lvl2_topk2,...],...], 
+    [[eval2_lvl1_topk1, eval2_lvl1_topk2,...], [eval2_lvl2_topk1, eval2_lvl2_topk2,...],...]...]`
 
     Args:
         prediction (torch.Tensor): 
@@ -200,50 +227,71 @@ def accuracy_hierachy(prediction: torch.Tensor,
             Values to compute the accuracy over. Defaults to (1,5).
         originalTarget (Optional[Sequence[int]], optional): 
             Ground truth target labels based on the original dataset/annfile. Shape: (N,). Defaults to None.
-        evalClasses (Optional[Sequence[int]], optional): 
+        evalClasses (Optional[Sequence[int] | Sequence[Sequence[int]]], optional): 
             Target classes to be evaluated over. Should correspond to the indices in `target` or 
-             classes from `originalTarget`. Defaults to None.
+            classes from `originalTarget`. Defaults to None.
 
     Returns:
-        Tuple[List[List[torch.Tensor]], int]: 
+        Tuple[List[List[torch.Tensor] | List[List[torch.Tensor]]], int | List[int]]: 
             List of accuracy values for each topk value of each hierarchy level and the number of relevant classes.
-             The first list corresponds to the hierarchy levels while the second list corresponds to the topk values.
+            The first list corresponds to the hierarchy levels while the second list corresponds to the topk values.
     """
-    accs = []
-    for lvl_map in hierarchy_map:
+    if isinstance(topk, int):
+        topk = (topk,)
+    maxk = min(max(topk), prediction.size()[1])
+    maxk = min(max(topk), prediction.size(1))
+    
+    if evalClasses is None:
+        # If no classes are specified all classes are evaluated
+        # then originalClasses is irrelevant
+        # Convert to list for uniform handling below
+        relevantTargetMasks = [torch.ones_like(target, dtype=bool)]
+    else:
+        if originalTarget is None:
+            warnings.warn('originalTarget is not specified when evalClasses given. '
+                            'Use target directly instead. '
+                            'This can cause unexpected results if target index does not '
+                            'correspond to the original class index.')
+            originalTarget = target
+        # .cpu() is achieves significant speedup
+        # .detach() is not necessary as we are in no_grad anyways and does not impact performance significantly
+        # but might as well
+        if isinstance(evalClasses[0], int):
+            # Convert to list for uniform handling below
+            relevantTargetMasks = [torch.tensor([i in evalClasses for i in originalTarget.detach().cpu()])]
+        else:
+            # Make .cpu() and .detach() ONLY once outside loop
+            o_trg = originalTarget.detach().cpu()
+            relevantTargetMasks = [torch.tensor([i in eClasses for i in o_trg]) for eClasses in evalClasses]
+    # Required to only account for relevant classes when building statistics
+    num_relevants = [targetMask.sum().item() for targetMask in relevantTargetMasks]
+    
+    # len(relevantTargetMasks)xlen(topk)xlen(hierarchy_map)
+    final_accs = torch.empty(len(relevantTargetMasks), len(topk), len(hierarchy_map), dtype=torch.float32)
+    for lvl, lvl_map in enumerate(hierarchy_map):
         mapped_target = torch.tensor([lvl_map[t.item()] for t in target], dtype=target.dtype, device=target.device)
-        maxk = min(max(topk), prediction.size()[1])
         _, pred = prediction.topk(maxk, 1, True, True)
         mapped_pred = torch.tensor([lvl_map[p.item()] for p in pred.flatten()], dtype=pred.dtype, device=pred.device).reshape(pred.size())
         mapped_pred = mapped_pred.t()
-        if evalClasses is None:
-            # If no classes are specified all classes are evaluated
-            # then originalClasses is irrelevant
-            relevantTargetMask = torch.ones_like(target, dtype=bool)
-        else:
-            if originalTarget is None:
-                warnings.warn('originalTarget is not specified when evalClasses given. '
-                              'Use target directly instead. '
-                              'This can cause unexpected results if target index does not '
-                              'correspond to the original class index.')
-                originalTarget = target
-            relevantTargetMask = torch.tensor([i in evalClasses for i in originalTarget])
-        # Required to only account for relevant classes when building statistics
-        num_relevant = relevantTargetMask.sum().item()
-        # If no relevant classes are present return 100% accuracy
-        # and avoid division by zero causing NaN
-        if num_relevant == 0:
-            accs.append([torch.tensor(1)]*len(topk))
-            continue
-        correct = mapped_pred.eq(mapped_target.reshape(1, -1).expand_as(mapped_pred))
-        relevant_correct = correct[:,relevantTargetMask]
-        # acc = [relevant_correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / num_relevant for k in topk]
-        # Need to clamp values of each prediction to 1 to avoid multiple correct predictions being counted
-        # possible for lower hierarchy levels (e.g. multiple models of the same make)
-        acc = [relevant_correct[:min(k, maxk)].float().sum(0).clamp(max=1).sum() * 100. / num_relevant for k in topk]
-        accs.append(acc)
-    return accs, num_relevant
         
+        for eval_group, (num_relevant, targetMask) in enumerate(zip(num_relevants, relevantTargetMasks)):
+            # If no relevant classes are present return 100% accuracy
+            # and avoid division by zero causing NaN
+            if num_relevant == 0:
+                final_accs[eval_group,:,lvl] = torch.ones(len(topk))
+                continue
+            correct = mapped_pred.eq(mapped_target.reshape(1, -1).expand_as(mapped_pred))
+            relevant_correct = correct[:,targetMask]
+            # Need to clamp values of each prediction to 1 to avoid multiple correct predictions being counted
+            # possible for lower hierarchy levels (e.g. multiple models of the same make)
+            final_accs[eval_group,:,lvl] = torch.Tensor([relevant_correct[:min(k, maxk)].float().sum(0).clamp(max=1).sum() * 100. / num_relevant for k in topk])
+            
+    # If only a single evalClasses was given return individual values instead of list
+    # using len instead of isinstance for slightly better performance
+    if len(num_relevants) == 1:
+        return final_accs[0] , num_relevants[0]
+    else:
+        return final_accs, num_relevants
 
 class PrecisionRecallF1:
     def __init__(self, 
@@ -353,7 +401,7 @@ class PrecisionRecallF1:
     def compute(self) -> Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]]:...
     
     @torch.no_grad()   
-    def compute(self) -> METRIC_RETURN_TYPE:
+    def compute(self) -> F1_RETURN_TYPE:
         if self.threshold is not None or isinstance(self.topk, int):
             precision = self.tp_sum / torch.clamp(self.pred_sum, min=1).float() * 100
             recall = self.tp_sum / torch.clamp(self.gt_sum, min=1).float() * 100
@@ -395,7 +443,7 @@ def prec_rec_f1(output: torch.Tensor, target: torch.Tensor,
 def prec_rec_f1(output: torch.Tensor, target: torch.Tensor, 
                 thr: Optional[float] = None, topk: Optional[int|Sequence[int]] = None,
                 evalClasses: Optional[Sequence[int]] = None,
-                ) -> METRIC_RETURN_TYPE:
+                ) -> F1_RETURN_TYPE:
     """Calculate base classification task metrics, such as  precision, recall,
     f1_score, support. 
     
@@ -480,4 +528,105 @@ def prec_rec_f1(output: torch.Tensor, target: torch.Tensor,
                 recall += (recall_k[classMask].mean(0),)
                 f1_score += (f1_score_k[classMask].mean(0),)
 
+        return precision, recall, f1_score
+    
+
+class MultiplePrecisionRecallF1:
+    """Precision, Recall and F1 Score metric for multiple eval Classes.
+    
+    Taken partially from MMPretrain with average='macro' configuration and without support.
+    """
+    def __init__(self, 
+                 num_classes: int | Sequence[int],
+                 device: torch.device,
+                 topk: Optional[int] = None,
+                 threshold: Optional[float] = None, 
+                 evalClasses: Optional[Sequence[Sequence[int]]] = None,
+                 average: str = 'macro'):
+        # Use top-1 if nothing specified
+        if threshold is None and topk is None:
+            topk = 1
+        
+        self.num_classes = num_classes
+        self.device = device
+        self.topk = topk
+        self.threshold = threshold
+        self.evalClasses = evalClasses
+        self.average = average
+        if evalClasses is None:
+            self.evalClassMask = torch.ones(1, num_classes, dtype=bool)
+        else:
+            self.evalClassMask = torch.tensor([[i in eClasses for i in range(num_classes)] for eClasses in evalClasses], 
+                                              dtype=bool)
+        
+        if self.threshold is None:
+            self._compute_pos_inds = self._compute_pos_inds_topk
+        else:
+            self._compute_pos_inds = self._compute_pos_inds_thres
+            
+        self.reset()
+
+    def reset(self):
+        self.tp_sum: torch.Tensor = torch.zeros(self.num_classes, dtype=int, device=self.device)
+        self.pred_sum: torch.Tensor = torch.zeros(self.num_classes, dtype=int, device=self.device)
+        self.gt_sum: torch.Tensor = torch.zeros(self.num_classes, dtype=int, device=self.device)
+        
+    def _compute_pos_inds_thres(self, pred_cls_prob: torch.Tensor) -> torch.Tensor:
+        return (pred_cls_prob >= self.threshold).long()
+    
+    def _compute_pos_inds_topk(self, pred_cls_prob: torch.Tensor) -> torch.Tensor:
+        _, topk_indices = pred_cls_prob.topk(self.topk, 1)
+        return torch.zeros_like(pred_cls_prob, dtype=int).scatter_(1, topk_indices, 1)
+    
+    @torch.no_grad()   
+    def update(self, 
+               prediction: torch.Tensor, 
+               target: torch.Tensor,) -> None:
+        """Computes and stores/updates the number of true positive, predicted positive 
+        and ground truth positive.
+
+        Args:
+            prediction (torch.Tensor): 
+                Unnormalized logits of the prediction. Shape: (N, num_classes)
+            target (torch.Tensor): 
+                Class indices of the prediction target. Shape: (N,)
+        """
+        pred_class_prob = _format_label(prediction, False, self.num_classes)
+        target_one_hot = _format_label(target, True, self.num_classes)
+        self.gt_sum += target_one_hot.sum(0)
+        
+        if self.threshold is not None:
+            pos_inds = (pred_class_prob >= self.threshold).long()
+        else:
+            _, topk_indices = pred_class_prob.topk(self.topk, 1)
+            pos_inds = torch.zeros_like(pred_class_prob, dtype=int).scatter_(1, topk_indices, 1)
+            
+        class_correct = pos_inds & target_one_hot
+        self.tp_sum += class_correct.sum(0)
+        self.pred_sum += pos_inds.sum(0)
+
+    @overload
+    @torch.no_grad()   
+    def compute(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:...
+    @overload
+    @torch.no_grad()   
+    def compute(self) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:...
+    
+    @torch.no_grad()   
+    def compute(self) -> MULTIPLE_F1_RETURN_TYPE:
+        """Computes the precision, recall and f1 score based on the currently stored values.
+        Depending on `self.average` either the micro metrics are returned or the macro metrics
+        are computed for all eval class collections specified in `self.evalClasses`.
+
+        Returns:
+            MULTIPLE_F1_RETURN_TYPE: Precision, Recall, F1 Score based on the average configuration.
+        """
+        precision = self.tp_sum / torch.clamp(self.pred_sum, min=1).float() * 100
+        recall = self.tp_sum / torch.clamp(self.gt_sum, min=1).float() * 100
+        f1_score = 2 * precision * recall / torch.clamp(precision + recall, 
+                                                        min=torch.finfo(torch.float32).eps)
+        if self.average == 'macro':
+            precision = [precision[evalMask].mean(0) for evalMask in self.evalClasses]
+            recall = [recall[evalMask].mean(0) for evalMask in self.evalClasses]
+            f1_score = [f1_score[evalMask].mean(0) for evalMask in self.evalClasses]
         return precision, recall, f1_score

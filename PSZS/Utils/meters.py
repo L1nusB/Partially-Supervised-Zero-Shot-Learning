@@ -10,7 +10,7 @@ class _BaseMeter:
     def __init__(self, name: str, fmt: Optional[str] = ':f'):
         self.name = name
         self.fmt = fmt if fmt else ''
-        self.exclude_reset = ('name', 'fmt', 'exclude_reset')
+        self.exclude_reset = ('name', 'fmt', 'exclude_reset', 'defaultField')
         self.reset()
 
     def reset(self) -> None:
@@ -231,7 +231,8 @@ class DynamicStatsMeter(_BaseMeter):
                           fmt: Optional[str] = ':f', 
                           include_last: bool = False, 
                           include_total: bool = False,
-                          include_batch: bool = False):
+                          include_batch: bool = False,
+                          defaultField: Optional[str] = None,):
         includes = ['avg']
         if include_last:
             includes += ['last']
@@ -239,38 +240,43 @@ class DynamicStatsMeter(_BaseMeter):
             includes += ['total']
         if include_batch:
             includes += ['batch']
-        return DynamicStatsMeter.get_stats_meter(name, fields, fmt, includes=includes)
+        return DynamicStatsMeter.get_stats_meter(name, fields, fmt, includes=includes, defaultField=defaultField)
 
     @staticmethod
-    def get_stats_meter_all(name: str, fields: str|Sequence[str], fmt: Optional[str] = ':f'):
+    def get_stats_meter_all(name: str, fields: str|Sequence[str], 
+                            fmt: Optional[str] = ':f', defaultField: Optional[str] = None,):
         return DynamicStatsMeter.get_stats_meter(name, fields, fmt, includes='all')
     
     @staticmethod
     def get_stats_meter_time(name: str, fields: str|Sequence[str], fmt: Optional[str] = ':f', 
-                             reduce: bool = True, show_batch: bool = True):
+                             defaultField: Optional[str] = None, reduce: bool = True, show_batch: bool = True):
         if reduce:
             return DynamicStatsMeter.get_average_meter(name, 
                                                        fields, 
                                                        fmt, 
                                                        include_total=True,
-                                                       include_batch=show_batch)
+                                                       include_batch=show_batch,
+                                                       defaultField=defaultField)
         else:
             if show_batch:
                 excludes = 'last'
             else:
                 excludes = ['last', 'batch']
                 
-            return DynamicStatsMeter.get_stats_meter(name, fields, fmt, excludes=excludes)
+            return DynamicStatsMeter.get_stats_meter(name, fields, fmt, excludes=excludes, defaultField=defaultField)
         
     @staticmethod
-    def get_stats_meter_min_max(name: str, fields: str|Sequence[str], fmt: Optional[str] = ':f'):
+    def get_stats_meter_min_max(name: str, fields: str|Sequence[str], 
+                                fmt: Optional[str] = ':f', defaultField: Optional[str] = None):
         return DynamicStatsMeter.get_stats_meter(name, fields, fmt, 
-                                                 includes=['avg', 'min', 'max'])
+                                                 includes=['avg', 'min', 'max'],
+                                                 defaultField=defaultField)
         
     @staticmethod
     def get_stats_meter(name: str, fields: str|Sequence[str], fmt: Optional[str] = ':f', 
                         excludes: Optional[str|Sequence[str]] = None,
-                        includes: Optional[str|Sequence[str]] = None):
+                        includes: Optional[str|Sequence[str]] = None,
+                        defaultField: Optional[str] = None):
         # Set Default values
         show_dict = {
                 'total':False,
@@ -330,12 +336,13 @@ class DynamicStatsMeter(_BaseMeter):
                     if include in show_dict:
                         show_dict[include] = True
         show_dict = {f'show_{k}':v for k,v in show_dict.items()}
-        return DynamicStatsMeter(name, fields, fmt, **show_dict)
+        return DynamicStatsMeter(name, fields, fmt, defaultField=defaultField, **show_dict)
     
     def __init__(self, 
                  name: str, 
                  fields: str|Sequence[str], 
                  fmt: Optional[str] = ':f',  
+                 defaultField: Optional[str] = None, 
                  show_total: bool = False,
                  show_min: bool = False, 
                  show_max: bool = False, 
@@ -352,6 +359,7 @@ class DynamicStatsMeter(_BaseMeter):
         self.watched_specifiers = self.watched_specifiers + ['max'] if show_max else self.watched_specifiers
         self.watched_fields = fields
         self.exclude_reset += ('watched_specifiers','watched_fields')
+        self.defaultField = defaultField
         
         for field in self.watched_fields:
             self.__dict__[f'last_{field}'] = 0
@@ -373,7 +381,7 @@ class DynamicStatsMeter(_BaseMeter):
         for field in self.watched_fields:
             self.__dict__[f'batch_{field}'] = 0
 
-    def update(self, vals:Any|Sequence[Any], n:int|Sequence[int]=1):
+    def update(self, vals:Sequence[Any], n:int|Sequence[int]=1):
         # If n is 0 do nothing
         if n == 0:
             return
@@ -385,20 +393,27 @@ class DynamicStatsMeter(_BaseMeter):
         else:
             assert len(n)==len(vals), f'Number of counts {len(n)} does not match number of values {len(vals)}'
             
+        if isinstance(vals, torch.Tensor) or isinstance(vals[0], torch.Tensor):
+            vals = [val.item() for val in vals]
+            
         for index, field in enumerate(self.watched_fields):
+            count = n[index]
             # If n is 0 do nothing
-            if n[index] == 0:
+            if count == 0:
                 continue
-            self.__dict__[f'last_{field}'] = vals[index]
-            self.__dict__[f'count_{field}'] += n[index]
-            self.__dict__[f'total_{field}'] += vals[index]*n[index]
-            self.__dict__[f'batch_{field}'] += vals[index]*n[index]
-            self.__dict__[f'min_{field}'] = min(self.__dict__[f'min_{field}'], vals[index])
-            self.__dict__[f'max_{field}'] = max(self.__dict__[f'max_{field}'], vals[index])
-            if vals[index] > 0:
+            val = vals[index]
+            self.__dict__[f'last_{field}'] = val
+            self.__dict__[f'count_{field}'] += count
+            self.__dict__[f'total_{field}'] += val*count
+            self.__dict__[f'batch_{field}'] += val*count
+            self.__dict__[f'min_{field}'] = min(self.__dict__[f'min_{field}'], val)
+            self.__dict__[f'max_{field}'] = max(self.__dict__[f'max_{field}'], val)
+            if val > 0:
                 self.__dict__[f'avg_{field}'] = self.__dict__[f'total_{field}'] / self.__dict__[f'count_{field}']
             
-    def get_avg(self, field: str) -> float:
+    def get_avg(self, field: Optional[str]=None) -> float:
+        if field is None:
+            field = self.defaultField
         if 'avg' in self.watched_specifiers:
             val = self.__dict__[f'avg_{field}']
             if isinstance(val, float):
@@ -413,7 +428,9 @@ class DynamicStatsMeter(_BaseMeter):
             warnings.warn('avg is not a watched specifier for this meter.')
             return 0
         
-    def get_last(self, field: str) -> float:
+    def get_last(self, field: Optional[str]=None) -> float:
+        if field is None:
+            field = self.defaultField
         if 'last' in self.watched_specifiers:
             val = self.__dict__[f'last_{field}']
             if isinstance(val, float):
