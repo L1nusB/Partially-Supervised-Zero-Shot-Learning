@@ -36,18 +36,24 @@ class Base_Single(Base_Optimizer):
         else:
             self.hierarchy_level_names = [f'Level{i+1}' for i in range(model.classifier.num_head_pred)]
 
+        # If the model used classifier does not return multiple outputs we store the index of the class
+        # that gets predicted. Otherwise we store None and consider all levels.
+        # The attribute is required for _map_labels (to only apply the mapping to the correct level)
         if model.classifier.returns_multiple_outputs:
             self.hierarchy_level = None
+            # For validation we only use the main hierarchy level and if this is not given 
+            # use the last level as default (most fine)
+            # Separate from the case with single predictions where we can reference the value of the source domain.
+            self.hierarchy_level_val: int = getattr(val_loader.dataset, 'main_class_index', -1)
         else:
             # Generally the dataset is a Concat Dataset which has the attribute 'main_class_index'
             # otherwise use -1 as default value
             self.hierarchy_level = getattr(train_iter.dataset, 'main_class_index', -1)
+            # If validation dataset does not have a main_class_index attribute use the 
+            # value of the first training dataset as this corresponds to the source domain which should match the validation
+            self.hierarchy_level_val: int = getattr(val_loader.dataset, 'main_class_index', self.hierarchy_level)
         # Typehint correctly for intellisense
         self.hierarchy_level : int | None
-        # If validation dataset does not have a main_class_index attribute use the 
-        # value of the first training dataset
-        # as this corresponds to the source domain which should match the validation
-        self.hierarchy_level_val: int | None = getattr(val_loader.dataset, 'main_class_index', self.hierarchy_level)
         # Needs to be set before calling super().__init__ (needed in _build_progress_bars)
         self.main_metric_field = self.hierarchy_level_names[self.hierarchy_level_val]
         
@@ -113,18 +119,10 @@ class Base_Single(Base_Optimizer):
     @property
     def train_batch_size(self) -> int:
         return self.train_batch_sizes
-            
-    @property
-    def num_head_pred(self) -> int:
-        return self.model.classifier.num_head_pred
     
     @property
     def train_descriptor(self) -> DatasetDescriptor | None:
         return self.train_iter.dataset_descriptor
-    
-    @property
-    def multiple_outputs(self) -> bool:
-        return self.model.classifier.returns_multiple_outputs
     
     ######### Progress Bars #########
     def _build_progress_bars(self) -> Tuple[ProgressMeter, ProgressMeter]:

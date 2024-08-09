@@ -213,7 +213,11 @@ class CustomModel(nn.Module):
         else:
             raise ValueError(f"Strategy {strategy} not recognized. "
                              f"Must be one of {MIXING_STRATEGIES} or "
-                             f"{list(MIXING_STRATEGY_MAP.keys())}")        
+                             f"{list(MIXING_STRATEGY_MAP.keys())}")       
+            
+    @property
+    def num_pred(self) -> int:
+        return self.classifier.num_head_pred 
     
     def mixing_weight(self, increase_step: bool = True) -> Tuple[float, ...]:
         """Computes the mixing weights for each level of the hierarchy.

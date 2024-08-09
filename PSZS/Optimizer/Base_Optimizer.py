@@ -233,6 +233,14 @@ class Base_Optimizer():
     def num_eval_groups(self) -> int:
         return len(self.eval_classes)
     
+    @property
+    def multiple_outputs(self) -> bool:
+        return self.model.classifier.returns_multiple_outputs
+    
+    @property
+    def num_head_pred(self) -> int:
+        return self.model.num_pred
+    
     def _get_train_batch_sizes(self) -> int | List[int]:
         if isinstance(self.train_iters, ForeverDataIterator):
             return self.train_iters.batch_size
@@ -666,6 +674,16 @@ class Base_Optimizer():
             forward_res, f = self._forward_train(data)
 
             interal_labels = self._map_labels(labels=labels, mode='pred')
+            
+            # Remove the values from the target/labels corresponding to levels that are not given in the predictions
+            # e.g. if the dataset has labels for 3 levels but the model only predicts for 2 levels
+            # Negative indices as we go from coarse to fine.
+            # During train this will also affect eval metrics (but not for val or test later)
+            # which is fine as it is questionable when one uses eval during train and then
+            # why also look at other levels which are not predicted.
+            if self.multiple_outputs:
+                labels = [l[:,-self.num_head_pred:] for l in labels]
+                interal_labels = [l[:,-self.num_head_pred:] for l in interal_labels]
             
             # Compute Loss and update meters
             # Pass mapped labels to compute loss.

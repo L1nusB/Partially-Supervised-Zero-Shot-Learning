@@ -104,6 +104,12 @@ class CustomClassifier(nn.Module):
                 else:
                     raise ValueError("num_classes must be of shape (num_inputs,) or (num_head_predictions,)")
             case 2:
+                # If more classes are known than head predictions, only use the last ones
+                # i.e. only the last fine num_head_pred levels are used
+                if num_classes.shape[1] > num_head_pred:
+                    warnings.warn(f"More class levels ({num_classes.shape[1]}) are known than head predictions ({num_head_pred}). "
+                                  f"Using only the last {num_head_pred} class levels.")
+                    num_classes = num_classes[:,-num_head_pred:]
                 # Already in correct shape
                 assert num_classes.shape == (num_inputs, num_head_pred), f"num_classes must be of shape ({num_inputs}, {num_head_pred}), but is {num_classes.shape}"
         self.num_classes : npt.NDArray[np.int_] = num_classes
