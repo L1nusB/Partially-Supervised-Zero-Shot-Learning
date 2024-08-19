@@ -5,7 +5,7 @@ import numpy.typing as npt
 import torch
 from torch.nn.modules import Module
 
-from tllib.modules.grl import WarmStartGradientReverseLayer
+from PSZS.Alignment import WarmStartGradientReverseLayer
 
 from timm.optim import create_optimizer_v2
 

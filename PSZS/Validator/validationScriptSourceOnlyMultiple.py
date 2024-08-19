@@ -59,6 +59,7 @@ def main(args):
         
     args.amp = not args.no_amp
     args.eval_base = not args.no_base_eval
+    args.split_data = not args.no_split_data
         
     # Setup amp for mixed precision training
     amp_autocast, loss_scaler = setup_amp(args=args, device=device)
@@ -320,6 +321,9 @@ if __name__ == '__main__':
     group.add_argument('--ds-split', type=str, default=None,
                        help='Which split of the dataset should be used. Gets appended to annfile dir. Default None.')
     group.add_argument('--num-classes', type=int, nargs='+')
+    group.add_argument('--no-split-data', action='store_true',
+                       help='Split data (source and target domain) into train/val/test. Default: False')
+    
     # Data Loader
     group = parser.add_argument_group('Dataloader')
     group.add_argument("--no-prefetch", action='store_true',

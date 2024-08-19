@@ -1,5 +1,6 @@
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Self, TypeAlias
+import warnings
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ from timm.scheduler.scheduler import Scheduler
 import PSZS.Classifiers as Classifiers
 import PSZS.Classifiers.Heads as Heads
 from PSZS.Models.funcs import *
+import PSZS.Models.Losses as losses
 
 DAT_TYPE: TypeAlias = torch.Tensor | Tuple[torch.Tensor, ...]
 TRAIN_PRED_TYPE: TypeAlias = Sequence[torch.Tensor] | Sequence[Sequence[torch.Tensor]]
@@ -69,7 +71,6 @@ MIXING_STRATEGY_MAP = {
         'cos': 'cosine',
         'sig': 'sigmoid',
 }
-
 class CustomModel(nn.Module):
     """A generic model class for custom models."""
     allow_non_strict_checkpoint: bool = False
@@ -81,6 +82,7 @@ class CustomModel(nn.Module):
                  opt_kwargs: Dict[str, Any],
                  sched_kwargs: Dict[str, Any],
                  head_type: str = "SimpleHead",
+                 cls_loss: str = "ce",
                  bottleneck_dim: Optional[int] = None,
                  hierarchy_accum_func: Callable[[Sequence[torch.Tensor]], torch.Tensor] | str = "sum",
                  feature_loss_func: Optional[Callable[[Sequence[torch.Tensor]], Sequence[torch.Tensor]] | str] = None,
@@ -102,6 +104,8 @@ class CustomModel(nn.Module):
                  If `None`, the model is the backbone itself
             head_type (str): 
                 Type of the head to use. Must be one of the available heads. Defaults to `'SimpleHead'`
+            cls_loss (str):
+                Type of the classification loss to use specified by name. Defaults to `'ce'`
             bottleneck_dim (Optional[int]): 
                 Dimension of the bottleneck layer applied after backbone. 
                  If not specified (or <= 0) no bottleneck (identify) is applied. Defaults to None.
@@ -188,9 +192,9 @@ class CustomModel(nn.Module):
         self.batch_accum_func = torch.sum
         self.default_feature_loss_weight = 0
         self.default_logit_loss_weight = 0
-        # TODO: Implement other cls loss functions?
+        
+        self._resolve_loss(cls_loss, **classifier_kwargs)
         self.cls_loss_accum_func = sum
-        self.cls_loss_func = F.cross_entropy
         
         # Register DA components and other Parameters to be included in optimizers and schedulers
         self._register_da_components(**classifier_kwargs)
@@ -219,6 +223,8 @@ class CustomModel(nn.Module):
     def num_pred(self) -> int:
         return self.classifier.num_head_pred 
     
+    # Weights have nothing with gradients
+    @torch.no_grad()
     def mixing_weight(self, increase_step: bool = True) -> Tuple[float, ...]:
         """Computes the mixing weights for each level of the hierarchy.
         The weight is determined by the strategy set in the constructor, initial and final parameters,
@@ -235,22 +241,54 @@ class CustomModel(nn.Module):
         Returns:
             Tuple[float,...]: Weight for labels of each hierarchy level.
         """
-        mix_progress = mixing_progress(self.mixing_strategy, self.mixing_step, self.max_mixing_steps)
+        mix_progress = torch.tensor([mixing_progress(self.mixing_strategy, self.mixing_step, max_steps) 
+                        for max_steps in self.max_mixing_steps], device=self.initial_weights.device)
         if increase_step:
             self.mixing_step += 1
         weights = self.initial_weights + (self.final_weights - self.initial_weights) * mix_progress
         return weights
+    
+    def _resolve_loss(self, loss: str = 'ce', **kwargs) -> None:
+        print(f"Resolving loss {loss}.")
+        match loss:
+            case 'ce':
+                self.cls_loss_func = F.cross_entropy
+            case 'binom':
+                loss_type = losses.BinomialLoss
+                loss_kwargs = loss_type.resolve_params(**kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case 'contrastive':
+                loss_type = losses.ContrastiveLoss
+                loss_kwargs = loss_type.resolve_params(**kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case 'lifted':
+                loss_type = losses.LiftedStructureLoss
+                loss_kwargs = loss_type.resolve_params(**kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case 'margin':
+                loss_type = losses.MarginLoss
+                loss_kwargs = loss_type.resolve_params(nClasses=self.classifier.largest_num_classes_test_lvl, 
+                                                       **kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case 'ms':
+                loss_type = losses.MultiSimilarityLoss
+                loss_kwargs = loss_type.resolve_params(**kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case 'triplet':
+                loss_type = losses.HardMineTripletLoss
+                loss_kwargs = loss_type.resolve_params(**kwargs)
+                self.cls_loss_func = loss_type(**loss_kwargs)
+            case _:
+                warnings.warn(f"Loss {loss} not recognized. Using default Cross-Entropy loss. "
+                              f"Available losses: {losses.get_losses_names()}")
+                self.cls_loss_func = F.cross_entropy
+        print(f"Using loss function {self.cls_loss_func.__class__.__name__}.")
         
     def _register_hierarchy_accum(self) -> None:
         """Sets values of `hierarchy_accum_func` and `hierarchy_weights` based on the current `hierarchy_accum_func`.
         If a string is given, the corresponding function is resolved otherwise the passed Callable is used.
         Valid values for `hierarchy_accum_func` are: sum, avg, mean, make, model, weighted.
         """
-        if self.head_type.returns_multiple_outputs:
-            components_count = self.classifier.num_head_pred
-        else:
-            components_count = 1
-            
         # If a string is given, resolve the function otherwise use the given function
         # already in self.hierarchy_accum_func
         if isinstance(self.hierarchy_accum_func, str):
@@ -281,10 +319,10 @@ class CustomModel(nn.Module):
                         normalize = self.additional_params.get('normalize_weights', False)
                     # Parameter so it is sent to device as well (but no gradients)
                     self.hierarchy_weights = nn.Parameter(construct_weights(weights=weights, 
-                                                                            length=components_count,
+                                                                            length=self.num_pred,
                                                                             normalized=normalize),
                                                           requires_grad=False)
-                    assert len(self.hierarchy_weights) == components_count, f"Number of weights ({len(self.hierarchy_weights)}) must match number of components ({components_count})."
+                    assert len(self.hierarchy_weights) == self.num_pred, f"Number of weights ({len(self.hierarchy_weights)}) must match number of components ({self.num_pred})."
                     self.hierarchy_accum_func = partial(weighted_accum, weights=self.hierarchy_weights)
                 case _:
                     self.mixing_strategy = self.resolve_mixing_strategy(self.hierarchy_accum_func)
@@ -295,31 +333,31 @@ class CustomModel(nn.Module):
                         if initial_weight is None:
                             normalize = self.additional_params.get('normalize_weights', True)
                             initial_weight = construct_weights(weights=[0.1], 
-                                                               length=components_count,
+                                                               length=self.num_pred,
                                                                normalized=normalize)
-                        elif len(initial_weight) != components_count:
+                        elif len(initial_weight) != self.num_pred:
                             # Partial initial weights given, construct the rest
                             normalize = self.additional_params.get('normalize_weights', True)
                             initial_weight = construct_weights(weights=initial_weight,
-                                                               length=components_count,
+                                                               length=self.num_pred,
                                                                normalized=normalize)
                         if final_weight is None:
                             normalize = self.additional_params.get('normalize_weights', True)
                             final_weight = construct_weights(weights=[0.9], 
-                                                               length=components_count,
+                                                               length=self.num_pred,
                                                                normalized=normalize)
-                        elif len(final_weight) != components_count:
+                        elif len(final_weight) != self.num_pred:
                             # Partial final weights given, construct the rest
                             normalize = self.additional_params.get('normalize_weights', True)
                             final_weight = construct_weights(weights=final_weight,
-                                                               length=components_count,
+                                                               length=self.num_pred,
                                                                normalized=normalize)
-                        self.initial_weights = nn.Parameter(initial_weight, requires_grad=False)
-                        self.final_weights = nn.Parameter(final_weight, requires_grad=False)
-                        # self.initial_coarse_weight = self.additional_params.get('initial_weights', 0.9)
-                        # self.final_coarse_weight = self.additional_params.get('final_weights', 0.1)
-                        # If not specified will be set as max_mixing_epochs(10)*num_iters in Base_Optimizer
+                        self.initial_weights = nn.Parameter(torch.tensor(initial_weight), requires_grad=False)
+                        self.final_weights = nn.Parameter(torch.tensor(final_weight), requires_grad=False)
                         self.max_mixing_steps = self.additional_params.get('max_mixing_steps', None)
+                        if self.max_mixing_steps is not None:
+                            self.max_mixing_steps = nn.Parameter(torch.tensor([self.max_mixing_steps] * self.num_pred, dtype=int), 
+                                                                 requires_grad=False)
                         self.mixing_step = 0
                         self.hierarchy_accum_func = partial(dynamic_weighted_accum, weight_func=self.mixing_weight)
                     else:
@@ -580,8 +618,25 @@ class CustomModel(nn.Module):
     
     def compute_cls_loss(self, 
                          pred: PRED_TYPE, 
-                         target: LABEL_TYPE
+                         target: LABEL_TYPE,
+                         mixup: bool = False,
                          ) -> Tuple[torch.Tensor, Sequence[torch.Tensor]]:
+        """Computes the classification loss for the given predictions and targets using `cls_loss_func` and 
+        `cls_loss_accum_func`. The loss dynamically determines whether we have single or hierarchical predictions 
+        and use a single or multiple input/targets.
+        For hierarchical predictions, the loss is computed for each level and accumulated using `hierarchy_accum_func`.
+        Several internal assertions are made to ensure the correct input and target shapes.
+        In case mixup is used the target is expected to have a different shape thus it needs to be specified via `mixup`.
+        Note that mixup is not supported for hierarchical heads.
+
+        Args:
+            pred (PRED_TYPE): The predictions of the model.
+            target (LABEL_TYPE): The target labels for the predictions.
+            mixup (bool, optional): Whether mixup is used, affecting the target tensors. Defaults to False.
+
+        Returns:
+            Tuple[torch.Tensor, Sequence[torch.Tensor]]: Accumulated loss and loss components for each input.
+        """
         if self.head_type.returns_multiple_outputs:
             # Pad/Support for Base_Single optimizers
             if self.num_inputs < 2:
@@ -596,6 +651,7 @@ class CustomModel(nn.Module):
             # Match split feature predictions with ground truth labels
             assert len(pred[0])<=target[0].shape[-1], (f"Number of predictions ({len(pred[0])}) must "
                                                           f"be less than or equal to number of labels ({target[0].shape[-1]}).")
+            # Mixup is not supported for hierarchical heads
             loss_components = [self.hierarchy_accum_func(
                                 [self.cls_loss_func(p[level], gt[:,level]) for level in range(len(p))]
                                 ) for p, gt in zip(pred, target)]
@@ -607,7 +663,10 @@ class CustomModel(nn.Module):
                 assert target.ndim==1, "Head returns single predictions. Ground truth labels must be single label per sample."
             else:
                 # In this case target is a tuple of tensors
-                assert target[0].ndim==1, "Head returns single predictions. Ground truth labels must be single label per sample."
+                if mixup:
+                    assert target[0].ndim==2, f"Head returns single predictions with mixup enabled. But got ndim {target[0].ndim}."
+                else:
+                    assert target[0].ndim==1, f"Head returns single predictions. Ground truth labels must be single label per sample but got {target[0].ndim}."
             if isinstance(pred, torch.Tensor):
                 # This is the most "simple" case where a single prediction is given without any hierarchy
                 assert isinstance(target, torch.Tensor), "target must be single tensor."

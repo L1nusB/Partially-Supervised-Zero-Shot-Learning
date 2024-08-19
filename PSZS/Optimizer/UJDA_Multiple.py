@@ -3,6 +3,7 @@ from collections import OrderedDict
 import time
 from typing import Iterable, List, Optional, Tuple, Sequence
 import warnings
+import copy
 
 import torch
 
@@ -13,7 +14,7 @@ from timm.scheduler.scheduler import Scheduler
 from PSZS.Utils.meters import StatsMeter, ProgressMeter
 from PSZS.Utils.dataloader import ForeverDataIterator
 from PSZS.Optimizer.Base_Multiple import Base_Multiple, TRAIN_PRED_TYPE
-from PSZS.Models import METHOD_MODEL_MAP, UJDA_Model, save_checkpoint
+from PSZS.Models import METHOD_MODEL_MAP, UJDA_Model, save_checkpoint, zero
 from PSZS.Utils.io.logger import Logger
 from PSZS.Utils.io import filewriter
 
@@ -57,8 +58,6 @@ class UJDA_Multiple(Base_Multiple):
         self.phase = 1
         # Subphases for phase 2
         self.subphase = "1"
-        self.num_iters_phase_1 = iters_per_epoch
-        self.num_iters_phase_2 = iters_per_epoch
         # The number of internal iteration steps for the "third phase" (i.e. the adversarial training)
         # which is part of the second phase
         self.num_steps_adv = num_steps_adv
@@ -69,35 +68,6 @@ class UJDA_Multiple(Base_Multiple):
         self.joint_cls_loss_labeled_weight = joint_cls_loss_labeled_weight
         self.joint_cls_loss_unlabeled_weight = joint_cls_loss_unlabeled_weight
         self.joint_adv_loss_weight = joint_adv_loss_weight
-        
-        # Set the functions for the first phase that are used in the base class
-        # For phase 2 the individual functions are called in _train_computation_p2
-        self._forward_train = self._forward_train_phase_1
-        self._compute_loss = self._compute_loss_phase_1
-    
-    @property
-    def iters_per_epoch(self) -> int:
-        # If called before phase is set (i.e. during __init__) return dummy value of 1 by default. 
-        # The correct num_batches is set in _set_progress_bar
-        if hasattr(self, 'phase') == False:
-            return 1
-        elif self.phase == 1:
-            return self.num_iters_phase_1
-        elif self.phase == 2:
-            return self.num_iters_phase_2
-        else:
-            raise ValueError(f"Phase {self.phase} not supported")
-    @iters_per_epoch.setter
-    def iters_per_epoch(self, value: int) -> None:
-        # If called before phase is set (i.e. during __init__) do nothing
-        if hasattr(self, 'phase') == False:
-            return
-        if self.phase == 1:
-            self.num_iters_phase_1 = value
-        elif self.phase == 2:
-            self.num_iters_phase_2 = value
-        else:
-            raise ValueError(f"Phase {self.phase} not supported")
         
     @property
     def optimizers(self) -> List[torch.optim.Optimizer]:
@@ -144,13 +114,43 @@ class UJDA_Multiple(Base_Multiple):
         else:
             return super().lr_schedulers
         
+    @property
+    def progress_bar_train(self) -> ProgressMeter:
+        if hasattr(self, 'phase') == False:
+            return self._train_progress
+        if self.phase == 1:
+            return self.train_progress1
+        elif self.phase == 2:
+            return self.train_progress2
+        else:
+            return self._train_progress
+    @progress_bar_train.setter
+    def progress_bar_train(self, value: ProgressMeter) -> None:
+        self._train_progress = value
+        
+    @property
+    def meter_total_loss(self) -> StatsMeter:
+        if hasattr(self, 'phase') == False:
+            return self._meter_total_loss
+        if self.phase == 1:
+            return self.meter_total_loss_1
+        elif self.phase == 2 and self.subphase == '1':
+            return self.meter_total_loss_2_1
+        elif self.phase == 2 and self.subphase == '2':
+            return self.meter_total_loss_2_2
+        elif self.phase == 2 and self.subphase == '3':
+            return self.meter_total_loss_2_3
+        else:
+            return self._meter_total_loss
+    @meter_total_loss.setter
+    def meter_total_loss(self, value: StatsMeter) -> None:
+        self._meter_total_loss = value
+        
     def _expand_progress_bars(self, 
                               train_progress: ProgressMeter, 
                               val_progress: ProgressMeter
                               ) -> Tuple[ProgressMeter, ProgressMeter]:
-        """Mainly create the meters for all the phases.
-        Only the meters for the joint losses are added to the progress as they are used in every phase.
-        Setting of the other meters is done in _set_progress_bar."""
+        """Create the meters for all the phases. And construct the progress bars for the phases."""
         self.meter_loss_joint_1 = StatsMeter.get_stats_meter_min_max('Joint Loss 1', fmt=":3.2f",)
         self.meter_loss_joint_2 = StatsMeter.get_stats_meter_min_max('Joint Loss 2', fmt=":3.2f",)
         self.meter_entropy_loss = StatsMeter.get_stats_meter_min_max('Entropy Loss', fmt=":3.2f",)
@@ -162,67 +162,55 @@ class UJDA_Multiple(Base_Multiple):
         self.meter_total_loss_2_2 = StatsMeter.get_stats_meter_min_max('Total Loss (Phase 2[2])', fmt=":3.2f",)
         self.meter_total_loss_2_3 = StatsMeter.get_stats_meter_min_max('Total Loss (Phase 2[3])', fmt=":3.2f",)
         
-        
+        # Remove general total loss meter as we have separate ones for each phase
+        train_progress.remove_meter(self.meter_total_loss)
+        # These meters are used in all phases
         train_progress.add_meter(self.meter_loss_joint_1, exclude_simple_reset=True)
         train_progress.add_meter(self.meter_loss_joint_2, exclude_simple_reset=True)
+        
+        # Make shallow copies to keep the shared meters
+        self.train_progress1: ProgressMeter = train_progress.copy()
+        self.train_progress2: ProgressMeter = train_progress.copy()
+        
+        # Add relevant meter for phase 1 and set num_batches
+        self.train_progress1.add_meter(self.meter_total_loss_1, exclude_simple_reset=True)
+        self.train_progress1.set_num_batches(self.iters_per_epoch)
+        # Add relevant meter for phase 2 and set num_batches
+        self.train_progress2.add_meter(self.meter_entropy_loss, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_vat_loss, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_discrepancy, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_adversarial, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_total_loss_2_1, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_total_loss_2_2, exclude_simple_reset=True)
+        self.train_progress2.add_meter(self.meter_total_loss_2_3, exclude_simple_reset=True)  
+        self.train_progress2.set_num_batches(self.iters_per_epoch)
+        
         return train_progress, val_progress
     
-    def _set_progress_bar(self, phase: Optional[str]=None) -> None:
-        if phase is None:
-            phase = self.phase
-        print(f"Setting progress bar for phase: {phase}")
-        if phase == 1:
-            # Remove all meters from other phases
-            self.progress_bar_train.remove_meter(self.meter_entropy_loss)
-            self.progress_bar_train.remove_meter(self.meter_vat_loss)
-            self.progress_bar_train.remove_meter(self.meter_discrepancy)
-            self.progress_bar_train.remove_meter(self.meter_adversarial)
-            self.progress_bar_train.remove_meter(self.meter_total_loss_2_1)
-            self.progress_bar_train.remove_meter(self.meter_total_loss_2_2)
-            self.progress_bar_train.remove_meter(self.meter_total_loss_2_3)
-            # Add relevant meter for phase 1
-            self.progress_bar_train.add_meter(self.meter_total_loss_1, exclude_simple_reset=True)
-            # Set num_batches
-            self.progress_bar_train.set_num_batches(self.num_iters_phase_1)
-        elif phase == 2:
-            # Remove all meters from other phases
-            self.progress_bar_train.remove_meter(self.meter_total_loss_1)
-            # Add relevant meters for phase 2 (2_1 and 2_2) and phase 3
-            self.progress_bar_train.add_meter(self.meter_entropy_loss, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_vat_loss, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_discrepancy, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_adversarial, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_total_loss_2_1, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_total_loss_2_2, exclude_simple_reset=True)
-            self.progress_bar_train.add_meter(self.meter_total_loss_2_3, exclude_simple_reset=True)  
-            # Set num_batches
-            self.progress_bar_train.set_num_batches(self.num_iters_phase_2)
+    @property
+    def train_progress(self) -> ProgressMeter:
+        if hasattr(self, 'phase') == False:
+            return self._train_progress
+        if self.phase == 1:
+            return self.train_progress1
+        elif self.phase == 2:
+            return self.train_progress2
         else:
-            raise ValueError(f"Phase {phase} not supported")
-        
-    def _set_phase(self, phase: int) -> None:
-        self._set_progress_bar(phase)
-        if phase == 1:
-            # The functions for phase 1 are already set in __init__
-            self._train_computation = super()._train_computation
-        elif phase == 2:
-            # Only need to set the _train_computation pointer as 
-            # the functions for the subphases are called in _train_computation_p2
-            self._train_computation = self._train_computation_p2
+            return self._train_progress
+    @train_progress.setter
+    def train_progress(self, value: ProgressMeter) -> None:
+        self._train_progress = value
+    
+    def _forward_train(self, data: Tuple[torch.Tensor, torch.Tensor]):
+        """Computes the forward pass based on the current phase and subphase."""
+        if self.phase == 2 and self.subphase == '1':
+            return self._forward_train_phase_2_1(data)
         else:
-            raise ValueError(f"Phase {phase} not supported")
-        # Set phase only after successfully setting the functions
-        self.phase = phase
-
-    def _forward_train_phase_1(self, data: Tuple[torch.Tensor, torch.Tensor]
-                               ) -> Tuple[EXTENDED_TRAIN_PRED_TYPE, None]:
-        """For phase 1 only the classification loss is computed from a single forward pass.
-        As the features are not needed we can discard them."""
-        y, _ = super()._forward(data)
-        return y, None
+            # For phase 1 and all other subphases of phase 2 the forward pass is just a simple forward pass
+            return super()._forward(data)
     
     def _forward_train_phase_2_1(self, data: Tuple[torch.Tensor, torch.Tensor]
-                                 ) -> Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE]:
+                                 ) -> Tuple[Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE], torch.Tensor]:
         """For phase 2 (first part) the Virtual Adversarial Training (VAT) components and resulting
         predictions are computed. Note that in model.vat() some gradients and backwards passes are computed already.
         Note that only a single other forward pass is computed instead of original UJDA where
@@ -230,65 +218,58 @@ class UJDA_Multiple(Base_Multiple):
         This is both computationally expensive and not necessary as the data is the same even potentially
         causing overfitting or error accumulation."""
         data = torch.cat(data, dim=0)
-        # vat_s = self.model.vat(data_s, radius=self.vat_radius)
-        # self._zero_grad() # Reset gradients as in .vat() gradients are computed
-        # vat_t = self.model.vat(data_t, radius=self.vat_radius)
         data_vat = self.model.vat(data)
         self._zero_grad() # Reset gradients as in .vat() gradients are computed
-        # Only do a single forward pass as compared to original UJDA where each loss makes its own forward pass
-        (pred_cls, _, _), _ = self.model(data)
-        # Instead of making two forward passes we can concatenate the data and make a single forward pass
-        (pred_vat, _, _), _ = self.model(data_vat)
-        return pred_cls, pred_vat
+        # Can not simply concatenate the data as the auto_split between domains would wrongly
+        # mix the domains. (I.e. all data becomes source and all data_vat becomes target)
+        (pred_cls,_,_), f = self.model(data)
+        (pred_vat,_,_), f = self.model(data_vat)
+        return (pred_cls, pred_vat), f
     
-    def _forward_train_phase_2_2(self, 
-                                 data: Tuple[torch.Tensor, torch.Tensor]
-                                 ) -> EXTENDED_TRAIN_PRED_TYPE:
-        """For phase 2 (second part) only do a simple forward pass.
-        As for phase 2 (first part) this differs from UJDA where each loss computation makes its own forward pass."""
-        # Only do a single forward pass as compared to original UJDA where each loss makes its own forward pass
-        data = torch.cat(data, dim=0)
-        (pred_cls, pred_joint_1, pred_joint_2), _ = self.model(data)
-        return pred_cls, pred_joint_1, pred_joint_2
-    
-    def _forward_train_phase_2_3(self, 
-                                 data: Tuple[torch.Tensor, torch.Tensor]
-                                 ) -> Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor]:
-        """For phase 2 (third part) only do a simple forward pass.
-        As for the rest of phase 2 this differs from UJDA where each loss computation makes its own forward pass.
-        This is the same as for phase 2 (second part) but for consistency and potential future changes
-        they are kept separate."""
-        # Only do a single forward pass as compared to original UJDA where each loss makes its own forward pass
-        data = torch.cat(data, dim=0)
-        (pred_cls, pred_joint_1, pred_joint_2), _ = self.model(data)
-        return pred_cls, pred_joint_1, pred_joint_2
-    
+    def _filter_loss_components(self,
+                                pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor],
+                                target: Tuple[torch.Tensor,torch.Tensor],
+                                features: Optional[Sequence[torch.Tensor]]=None,
+                                og_labels: Optional[Tuple[torch.Tensor,torch.Tensor]]=None,
+                                mode: Optional[str]=None,
+                                ) -> Tuple[Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], Tuple[torch.Tensor,torch.Tensor], Optional[Sequence[torch.Tensor]], Optional[Tuple[torch.Tensor,torch.Tensor]]]:
+        """For now no direct support of filter_loss_components for UJDA model."""
+        return pred, target, features, og_labels
         
-    def _compute_loss_phase_1(self, 
-                              pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], 
-                              target: Tuple[torch.Tensor, torch.Tensor],
-                              features: None=None,
-                              og_labels: Optional[Tuple[torch.Tensor, torch.Tensor]]=None,
-                              ) -> torch.Tensor:
-        pred_cls, pred_joint_1, pred_joint_2 = pred
-        # Updating of losses meter is done in base class
-        cls_loss = super()._compute_loss(pred=pred_cls, target=target, features=features, og_labels=og_labels)
+    def _compute_loss_cls(self, 
+                          pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor] | Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE], 
+                          target: Tuple[torch.Tensor,torch.Tensor],) -> torch.Tensor:
+        if self.phase == 1:
+            pred_cls, _, _ = pred
+            return super()._compute_loss_cls(pred=pred_cls, target=target)
+        elif self.phase == 2 and self.subphase == '1':
+            pred_cls, _ = pred
+            return super()._compute_loss_cls(pred=pred_cls, target=target)
+        else:
+            return zero()
+    
+    def _compute_loss_logits(self, pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        return super()._compute_loss_logits(pred[0])
+    
+    def _compute_loss_adaptation(self, **others) -> torch.Tensor:
+        if self.phase == 1:
+            return self._compute_loss_adaptation_phase1(**others)
+        elif self.phase == 2 and self.subphase == '1':
+            return self._compute_loss_adaptation_phase2_1(**others)
+        elif self.phase == 2 and self.subphase == '2':
+            return self._compute_loss_adaptation_phase2_2(**others)
+        elif self.phase == 2 and self.subphase == '3':
+            return self._compute_loss_adaptation_phase2_3(**others)
+    
+    def _compute_loss_adaptation_phase1(self, pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], target: Tuple[torch.Tensor, torch.Tensor], **others) -> torch.Tensor:
+        _, pred_joint_1, pred_joint_2 = pred
         joint_loss_1, joint_loss_2 = self.model.compute_joint_loss_labeled(pred_joint_1, pred_joint_2, target)
         self.meter_loss_joint_1.update(joint_loss_1.item(), self.batch_size)
         self.meter_loss_joint_2.update(joint_loss_2.item(), self.batch_size)
-
-        total_loss = cls_loss + self.joint_loss_weight*(joint_loss_1 + joint_loss_2)
-        self.meter_total_loss_1.update(total_loss.item(), self.batch_size)
-        return total_loss
+        return self.joint_loss_weight*(joint_loss_1 + joint_loss_2)
     
-    def _compute_loss_phase_2_1(self, 
-                                pred: Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE], 
-                                target: Tuple[torch.Tensor, torch.Tensor],
-                                features: None=None,
-                                og_labels: Optional[Tuple[torch.Tensor, torch.Tensor]]=None,
-                                ) -> torch.Tensor:
+    def _compute_loss_adaptation_phase2_1(self, pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], **others) -> torch.Tensor:
         pred_cls, pred_vat = pred
-        cls_loss = super()._compute_loss(pred=pred_cls, target=target, features=features, og_labels=og_labels)
         if self.model.head_type.returns_multiple_outputs:
             pred_cls = pred_cls[self.model.classifier.test_head_pred_idx]
             pred_vat = pred_vat[self.model.classifier.test_head_pred_idx]
@@ -296,17 +277,10 @@ class UJDA_Multiple(Base_Multiple):
         self.meter_vat_loss.update(vat_loss.item(), self.batch_size)
         entropy_loss = self.model.compute_loss_entropy(pred_cls)
         self.meter_entropy_loss.update(entropy_loss.item(), self.batch_size)
-        
-        total_loss = cls_loss + self.vat_loss_weight * vat_loss + self.entropy_loss_weight * entropy_loss
-        self.meter_total_loss_2_1.update(total_loss.item(), self.batch_size)
-        return total_loss
+        return self.vat_loss_weight * vat_loss + self.entropy_loss_weight * entropy_loss
     
-    def _compute_loss_phase_2_2(self, 
-                                pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], 
-                                target: Tuple[torch.Tensor, torch.Tensor],
-                                features: None=None,
-                                og_labels: Optional[Tuple[torch.Tensor, torch.Tensor]]=None,
-                                ) -> torch.Tensor:
+    def _compute_loss_adaptation_phase2_2(self, pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], 
+                                          target: Tuple[torch.Tensor, torch.Tensor], **others) -> torch.Tensor:
         pred_cls, pred_joint_1, pred_joint_2 = pred
         if self.model.head_type.returns_multiple_outputs:
             pred_cls = pred_cls[self.model.classifier.test_head_pred_idx]
@@ -320,19 +294,12 @@ class UJDA_Multiple(Base_Multiple):
         self.meter_loss_joint_1.update(joint_loss_1_l.item() + joint_loss_1_ul.item(), self.batch_size)
         self.meter_loss_joint_2.update(joint_loss_2_l.item() + joint_loss_2_ul.item(), self.batch_size)
         self.meter_discrepancy.update(loss_discrepancy.item(), self.batch_size)
-        
-        total_loss = self.joint_cls_loss_labeled_weight*(joint_loss_1_l + joint_loss_2_l) + \
-            self.joint_cls_loss_unlabeled_weight*(joint_loss_1_ul + joint_loss_2_ul) - \
+        return self.joint_cls_loss_labeled_weight*(joint_loss_1_l + joint_loss_2_l) + \
+                self.joint_cls_loss_unlabeled_weight*(joint_loss_1_ul + joint_loss_2_ul) - \
                 self.discrepancy_loss_weight * loss_discrepancy
-        self.meter_total_loss_2_2.update(total_loss.item(), self.batch_size)
-        return total_loss
     
-    def _compute_loss_phase_2_3(self, 
-                                pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], 
-                                target: Tuple[torch.Tensor, torch.Tensor],
-                                features: None=None,
-                                og_labels: Optional[Tuple[torch.Tensor, torch.Tensor]]=None,
-                                ) -> torch.Tensor:
+    def _compute_loss_adaptation_phase2_3(self, pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor, torch.Tensor], 
+                                          target: Tuple[torch.Tensor, torch.Tensor], **others) -> torch.Tensor:
         pred_cls, pred_joint_1, pred_joint_2 = pred
         if self.model.head_type.returns_multiple_outputs:
             pred_cls = pred_cls[self.model.classifier.test_head_pred_idx]
@@ -346,10 +313,7 @@ class UJDA_Multiple(Base_Multiple):
         self.meter_discrepancy.update(loss_discrepancy.item(), self.batch_size)
         self.meter_adversarial.update(adv_joint_loss.item(), self.batch_size)
         
-        total_loss = self.joint_adv_loss_weight * adv_joint_loss + \
-            self.discrepancy_loss_weight * loss_discrepancy
-        self.meter_total_loss_2_3.update(total_loss.item(), self.batch_size)
-        return total_loss
+        return self.joint_adv_loss_weight * adv_joint_loss + self.discrepancy_loss_weight * loss_discrepancy
         
     def _calculate_metrics_train_single_output(self, 
                                                pred: Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE],
@@ -402,73 +366,47 @@ class UJDA_Multiple(Base_Multiple):
         if need_update:
             self._zero_grad()
             
+    def _train_computation(self, 
+                           data: Tuple[torch.Tensor, torch.Tensor], 
+                           labels: Tuple[torch.Tensor, torch.Tensor], 
+                           accum_steps: int,
+                           need_update: bool) -> None:
+        if self.phase == 1:
+            return super()._train_computation(data, labels, accum_steps, need_update)
+        elif self.phase == 2:
+            return self._train_computation_p2(data, labels, accum_steps, need_update)
+        else:
+            raise ValueError(f"Phase {self.phase} not supported")
+            
     def _train_computation_p2(self, 
-                              data: Tuple[torch.Tensor], 
-                              labels: Tuple[torch.Tensor], 
+                              data: Tuple[torch.Tensor, torch.Tensor], 
+                              labels: Tuple[torch.Tensor, torch.Tensor], 
                               accum_steps: int,
                               need_update: bool) -> None:
-        # Map labels to internal index
-        # _map_labels is defined in Base_Multiple
-        interal_labels = self._map_labels(labels=labels, mode='pred')
-        """ Phase 2_1 """
+        """Runs the subphases for phase 2. The individual functions for the subphases are dynamically resolved
+        based on `self.subphase`."""
+        
+        # Only evaluate once after all phases have run
+        eval_train = self.eval_during_train
+        self.eval_during_train = False
+        ### Phase 2_1 ###
         self.subphase = "1"
-        # Use autocast for mixed precision
-        with self.amp_autocast():
-            # Forward Pass/Compute Output
-            pred = self._forward_train_phase_2_1(data)
-            # Compute Loss and update meters
-            loss = self._compute_loss_phase_2_1(pred=pred, target=labels)
-            # Scale loss if accumulation to preserve same impact in backward
-            if self.scale_loss_accum and accum_steps > 1:
-                loss /= accum_steps
-        # Compute Gradient and do SGD/Optimizer step if update required
-        # outside of autocast scope (not sure if necessary but to be safe)
-        self._update_params(loss=loss, need_update=need_update)
+        super()._train_computation(data, labels, accum_steps, need_update)
         
-        """ Phase 2_2 """
+        ### Phase 2_2 ###
         self.subphase = "2"
-        # Reestablish autocast for mixed precision
-        with self.amp_autocast():
-            # Forward Pass/Compute Output
-            pred = self._forward_train_phase_2_2(data)
-            # Compute Loss and update meters
-            loss = self._compute_loss_phase_2_2(pred=pred, target=labels)
-            # Scale loss if accumulation to preserve same impact in backward
-            if self.scale_loss_accum and accum_steps > 1:
-                loss /= accum_steps
-        # Compute Gradient and do SGD/Optimizer step if update required
-        # outside of autocast scope (not sure if necessary but to be safe)
-        self._update_params(loss=loss, need_update=need_update)
-
-        """ Phase 2_3 """
-        self.subphase = "3"
-        # For the adversarial training we need to do all the steps
-        # for the specified number of times
-        for _ in range(self.num_steps_adv):
-            # Reestablish autocast for mixed precision
-            with self.amp_autocast():
-                # Forward Pass/Compute Output
-                pred = self._forward_train_phase_2_3(data)
-                # Compute Loss and update meters
-                loss = self._compute_loss_phase_2_3(pred=pred, target=labels)
-                # Scale loss if accumulation to preserve same impact in backward
-                if self.scale_loss_accum and accum_steps > 1:
-                    loss /= accum_steps
-            # Compute Gradient and do SGD/Optimizer step if update required
-            # outside of autocast scope (not sure if necessary but to be safe)
-            self._update_params(loss=loss, need_update=need_update)
+        super()._train_computation(data, labels, accum_steps, need_update)
         
-        if self.eval_during_train:
-            # Compute Eval Metrics (Accuracy) and Update Meters
-            # Only done once in the phase as metrics are computed which are not updated in the subphases
-            # Use the first part of the prediction from the last subphase
-            # which corresponds to the classification prediction
-            # This gets handled by _calculate_metrics_train_single_output/_multiple_output
-            self._compute_eval_metrics(pred=pred, 
-                                       target=interal_labels,
-                                       og_labels=labels, 
-                                       features=None, 
-                                       train=True)
+        ### Phase 2_3 ###
+        # For the adversarial training we need to do all the steps for the specified number of times
+        self.subphase = "3"
+        # Separate the number of steps for phase 3 to allow for train eval in final iteration
+        # and do not have an if condition in the loop
+        for _ in range(self.num_steps_adv - 1):
+            super()._train_computation(data, labels, accum_steps, need_update)
+        # Reset eval_during_train to its original (i.e. allow eval during training)
+        self.eval_during_train = eval_train
+        super()._train_computation(data, labels, accum_steps, need_update)
             
     def train(self, epochs: Optional[int]=None, start_epoch: Optional[int] = None) -> None:
         if epochs is None:
@@ -480,6 +418,8 @@ class UJDA_Multiple(Base_Multiple):
         
         if start_epoch is not None:
             self.epoch = start_epoch
+        else:
+            start_epoch = self.epoch
         
         start_time = time.time()     
         best_acc1 = 0.
@@ -488,14 +428,14 @@ class UJDA_Multiple(Base_Multiple):
         # start training
         best_acc1 = 0.
         print("Starting training for phase 1.")
-        self._set_phase(1)
-        for _ in range(epochs):
+        self.phase = 1
+        for epoch in range(epochs):
             # Optimizers are set properly in _set_phase to only contain relevant ones for the phase
             lrl = [param_group['lr'] for opt in self.optimizers for param_group in opt.param_groups]
             print(f'Learning rate: {",".join([f"{i:.4e}" for i in lrl])}')
             # No need to pass epoch as we set it appropriately in right before
             metrics = self.process_epoch()
-            acc1 = self.cls_acc_1
+            acc1 = self.eval_acc_1
             save_checkpoint(model=self.model, 
                             logger=self.logger, 
                             optimizer=self,
@@ -504,7 +444,7 @@ class UJDA_Multiple(Base_Multiple):
                             save_val_test=True)
             
             best_acc1 = max(acc1, best_acc1)
-            filewriter.update_summary(epoch=self.epoch, 
+            filewriter.update_summary(epoch=epoch+start_epoch, 
                                       metrics=metrics, 
                                       root=self.logger.out_dir,
                                       write_header=first_epoch)
@@ -517,13 +457,13 @@ class UJDA_Multiple(Base_Multiple):
         # Set epoch to 1 to display progress correctly
         self.epoch = 1
         # Subphases are set in _train_computation_p2 i.e. in process_epoch
-        self._set_phase(2)
-        for _ in range(epochs):
+        self.phase = 2
+        for epoch in range(epochs):
             lrl = [param_group['lr'] for opt in self.optimizers for param_group in opt.param_groups]
             print(f'Learning rate: {",".join([f"{i:.4e}" for i in lrl])}')
             # No need to pass epoch as we set it appropriately in right before
             metrics = self.process_epoch()
-            acc1 = self.cls_acc_1
+            acc1 = self.eval_acc_1
             save_checkpoint(model=self.model, 
                             logger=self.logger, 
                             optimizer=self,
@@ -532,7 +472,7 @@ class UJDA_Multiple(Base_Multiple):
                             save_val_test=True)
             
             best_acc1 = max(acc1, best_acc1)
-            filewriter.update_summary(epoch=self.epoch, 
+            filewriter.update_summary(epoch=epoch, 
                                       metrics=metrics, 
                                       root=self.logger.out_dir,
                                       write_header=first_epoch)

@@ -8,12 +8,13 @@ from torch.utils.data import DataLoader
 from PSZS.datasets.datasets import get_dataset, build_transform
 from PSZS.datasets import DatasetDescriptor
 from PSZS.Utils.dataloader import build_dataloader, ForeverDataIterator
+from PSZS.Utils.sampler import RandomIdentitySampler
 
 def create_data_objects(args: Namespace,
                         batch_size: int | Sequence[int],
                         phase: str,
                         device: torch.device = torch.device('cuda'),
-                        collate_fn: Optional[Callable] = None,
+                        collate_fn: Optional[Callable | Sequence[Callable]] = None,
                         img_dtype: torch.dtype = torch.float32,
                         descriptor: Optional[DatasetDescriptor|Sequence[DatasetDescriptor]] = None,
                         include_source_val_test: bool = False,
@@ -22,6 +23,7 @@ def create_data_objects(args: Namespace,
                         novel_key: str = 'target_novel',
                         split: bool = True,
                         ensure_balance: bool = False,
+                        apply_aug: bool | Tuple[bool, bool] = True,
                         ) -> Tuple[ForeverDataIterator, Optional[ForeverDataIterator]] | DataLoader | Tuple[DataLoader, ...]:
     if phase == 'train':
         return prepare_data_train(args=args,
@@ -33,7 +35,8 @@ def create_data_objects(args: Namespace,
                                 shared=True if getattr(args, shared_key, False) else False,
                                 shared_key=shared_key,
                                 use_phase=split,
-                                ensure_balance=ensure_balance)
+                                ensure_balance=ensure_balance,
+                                apply_aug=apply_aug)
     elif phase == 'val' or phase == 'test' or phase == 'val_test':
         return prepare_data_val_test(args=args, 
                                     batch_size=batch_size, 
@@ -64,13 +67,14 @@ def prepare_data_train(
         args: Namespace,
         batch_size: int | Sequence[int],
         device: torch.device = torch.device('cuda'),
-        collate_fn: Optional[Callable] = None,
+        collate_fn: Optional[Callable | Sequence[Callable]] = None,
         img_dtype: torch.dtype = torch.float32,
         descriptor: Optional[DatasetDescriptor | Sequence[DatasetDescriptor]] = None,
         shared: bool = True,
         shared_key: str = 'target_shared',
         use_phase: bool = True,
         ensure_balance: bool = False,
+        apply_aug: bool | Tuple[bool, bool] = True,
     ) -> Tuple[ForeverDataIterator, Optional[ForeverDataIterator]]:
     # Prepare training data
     re_num_splits = 0
@@ -91,6 +95,11 @@ def prepare_data_train(
         descriptor = [None, None]
     if isinstance(batch_size, int):
         batch_size = [batch_size, batch_size]
+    # Apply augmentation (or not) to both loaders if only one boolean is given
+    if isinstance(apply_aug, bool):
+        apply_aug = (apply_aug, apply_aug)
+    if collate_fn is None or isinstance(collate_fn, Callable):
+        collate_fn = [collate_fn, collate_fn]
         
     dataloader_args = dict({
         "input_size":args.resize_size,
@@ -102,10 +111,13 @@ def prepare_data_train(
         "mean":args.norm_mean,
         "std":args.norm_std,
         "num_workers":args.workers,
-        "collate_fn":collate_fn,
+        "collate_fn":collate_fn[0],
         "img_dtype":img_dtype,
         "device":device,
         "use_prefetcher":not args.no_prefetch,
+        # Shuffle is mutually exclusive with batch_sampler
+        # RandomSampler will produce a type of shuffling.
+        "shuffle": False if getattr(args, 'identity_sampler', False) else True, 
     })
     
     transform_args = dict({
@@ -114,39 +126,50 @@ def prepare_data_train(
         "resizing":args.train_resizing,
         "scale":args.scale,
         "ratio":args.ratio,
-        "hflip":args.h_flip,
-        "vflip":args.v_flip,
-        "color_jitter":args.color_jitter,
-        "color_jitter_prob":args.color_jitter_prob,
-        "auto_augment":args.aa,
         "interpolation":'bilinear',
         "mean":args.norm_mean,
         "std":args.norm_std,
-        "re_prob":args.reprob,
-        "re_mode":args.remode,
-        "re_count":args.recount,
-        "re_num_splits":re_num_splits,
         "use_prefetcher":not args.no_prefetch,
+        "hflip":args.h_flip, # Horizontal flipping is always applied
     })
+    transform_args_aug = transform_args.copy()
     
+    if apply_aug:
+        transform_args_aug.update({
+            "vflip":args.v_flip,
+            "color_jitter":args.color_jitter,
+            "color_jitter_prob":args.color_jitter_prob,
+            "auto_augment":args.aa,
+            "re_prob":args.reprob,
+            "re_mode":args.remode,
+            "re_count":args.recount,
+            "re_num_splits":re_num_splits,
+        })
     
     transform_train = build_transform(**transform_args)
+    transform_train_aug = build_transform(**transform_args_aug)
     
     dataset_args = dict({
         "root":args.root,
         "split":args.ds_split,
         "transform":transform_train,
         "phase":'train' if use_phase else None,
-        "infer_all_classes":args.infer_all_class_levels,
+        "infer_all_classes":getattr(args, "infer_all_class_levels", False),
+        "label_index": getattr(args, 'identity_sampler', False)
     })
     
     # Is set to None if not given as parameter
     dataset_args["descriptor"] = descriptor[0]
     dataset_args["descriptor_file"] = "descriptor_total.txt"
+    dataset_args["transform"] = transform_train_aug if apply_aug[0] else transform_train
     dataset_source = get_dataset(dataset_name=args.data,
                                  tasks=args.source,
                                  **dataset_args)
     
+    if getattr(args, 'identity_sampler', False):
+        # num_instances will use the internal default of 4
+        dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=batch_size[0])
+    dataloader_args['collate_fn'] = collate_fn[0]
     loader_source = build_dataloader(dataset=dataset_source,
                                       batch_size=batch_size[0],
                                       **dataloader_args)
@@ -156,10 +179,14 @@ def prepare_data_train(
         # Is set to None if not given as parameter
         dataset_args["descriptor"] = descriptor[1]
         dataset_args["descriptor_file"] = "descriptor_shared.txt"
+        dataset_args["transform"] = transform_train_aug if apply_aug[1] else transform_train
         dataset_target = get_dataset(dataset_name=args.data,
                                      tasks=getattr(args, shared_key),
                                      **dataset_args)
-        
+        if getattr(args, 'identity_sampler', False):
+            # num_instances will use the internal default of 4
+            dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_target, batch_size=batch_size[1])
+        dataloader_args['collate_fn'] = collate_fn[1]
         loader_target = build_dataloader(dataset=dataset_target,
                                           batch_size=batch_size[1],
                                           **dataloader_args)
@@ -170,12 +197,17 @@ def prepare_data_train(
         if rebalance: 
             if ensure_balance:
                 print(f"Rebalancing batch sizes to {bs_source} and {bs_target} for source and target shared domain.")
-                
+                if getattr(args, 'identity_sampler', False):
+                    # This can again change the batch size (only increase) by maximally 4 (default for num_instances)
+                    dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=bs_source)
                 loader_source = build_dataloader(dataset=dataset_source,
                                         batch_size=bs_source,
                                         **dataloader_args)
                 iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
                 
+                if getattr(args, 'identity_sampler', False):
+                    # This can again change the batch size (only increase) by maximally 4 (default for num_instances)
+                    dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=bs_target)
                 loader_target = build_dataloader(dataset=dataset_target,
                                             batch_size=bs_target,
                                             **dataloader_args)
@@ -324,6 +356,17 @@ def check_balanced_dataloaders(loader1: DataLoader | ForeverDataIterator,
     len2 = len(loader2)
     data1 = len(loader1.dataset)
     data2 = len(loader2.dataset)
+    bs1 = loader1.batch_size
+    if bs1 is None:
+        # ForeverDataIterator property batch_size already infers the batch size when using batch_sampler
+        assert isinstance(loader1, DataLoader)
+        bs1 = getattr(loader1.batch_sampler, 'batch_size', None)
+    bs2 = loader2.batch_size
+    if bs2 is None:
+        # ForeverDataIterator property batch_size already infers the batch size when using batch_sampler
+        assert isinstance(loader2, DataLoader)
+        bs2 = getattr(loader1.batch_sampler, 'batch_size', None)
+    
     total_batch_size = loader1.batch_size + loader2.batch_size
     dispary_ratio = abs(len1-len2) / (len1+len2)
     rebalance = False
@@ -334,4 +377,11 @@ def check_balanced_dataloaders(loader1: DataLoader | ForeverDataIterator,
         rebalance = True
     balanced_batch_size1 = int(total_batch_size / ((data2/data1)+1))
     balanced_batch_size2 = total_batch_size-balanced_batch_size1
+    # Ensure that all batches are at least 1
+    if balanced_batch_size2 == 0:
+        balanced_batch_size2 = 1
+        balanced_batch_size1 = total_batch_size-1
+    elif balanced_batch_size1 == 0:
+        balanced_batch_size1 = 1
+        balanced_batch_size2 = total_batch_size-1
     return rebalance, balanced_batch_size1, balanced_batch_size2

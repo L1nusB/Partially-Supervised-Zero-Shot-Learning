@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import warnings
 import time
@@ -51,6 +52,7 @@ def main(args):
         args.data = 'CompCarsHierarchy'
     
     args.amp = not args.no_amp
+    args.eval_base = not args.no_base_eval
     
     if args.classification_type != 'DefaultClassifier':
         warnings.warn(f"Custom classifier {args.classification_type} specified. "
@@ -60,7 +62,6 @@ def main(args):
     if args.include_source_eval and args.split_source==False:
         warnings.warn("Source evaluation is enabled but source domain is not split for training.")
 
-    args.eval_base = not args.no_base_eval
 
     print(args)
     
@@ -181,90 +182,77 @@ def main(args):
     optim.train()
     print(f"Training finished in {time.time() - start_time} seconds")
     print("Starting test evaluation")
-    # Evaluate on test set
+    evalNovDesc = args.eval_desc_novel
+    evalSharedDesc = args.eval_desc_shared
+    if evalNovDesc is None:
+        print("No novel descriptor provided. Using eval classes from novel descriptor of training.")
+        eval_class_groups = [eval_classes]
+    else:
+        eval_class_groups = [list(build_descriptor(fileRoot=args.root, fName=novDesc, ds_split=args.ds_split).targetIDs[-1]) for novDesc in evalNovDesc]
+    if evalSharedDesc is None:
+        print("No shared descriptor provided. Using eval classes from shared descriptor of training.")
+        eval_base_groups = [base_classes]
+    else:
+        eval_base_groups = [list(build_descriptor(fileRoot=args.root, fName=sharedDesc, ds_split=args.ds_split).targetIDs[-1]) for sharedDesc in evalSharedDesc]
+    
+    # If both are provided and have multiple values they must match
+    # If only one is provided and has multiple values the other is repeated or inferred
+    if len(eval_class_groups) > 1 and len(eval_base_groups) > 1:
+        assert len(eval_class_groups) == len(eval_base_groups), f"Number of novel and shared descriptors must match if both provide multiple. Got {len(eval_class_groups)} novel and {len(eval_base_groups)} shared descriptors."
+    elif len(eval_base_groups) > 1:
+        if args.eval_infer_other:
+            print("Inferring eval classes from shared and total classes.")
+            eval_class_groups = [[i for i in list(total_descriptor.targetIDs[-1]) if i not in classes] for classes in eval_base_groups]
+        else:
+            eval_class_groups = eval_class_groups*len(eval_base_groups)
+    elif len(eval_class_groups) > 1:
+        if args.eval_infer_other:
+            print("Inferring base classes from novel and total classes.")
+            eval_base_groups = [[i for i in list(total_descriptor.targetIDs[-1]) if i not in classes] for classes in eval_class_groups]
+        else:
+            eval_base_groups = eval_base_groups*len(eval_class_groups)
+    assert len(eval_class_groups) == len(eval_base_groups), f"Number of novel and shared descriptors must match. Got {len(eval_class_groups)} novel and {len(eval_base_groups)} shared descriptors."
+    
+    # Evaluate on test set with best model (needs to be loaded only once as it does not change during eval)
     load_checkpoint(model, checkpoint_path=logger.get_checkpoint_path('best'), strict=True)
-    # Create data loader for test with full batch size.
-    # Only create when needed to avoid keeping an unused data_loader permanent from the start
-    test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=False,
-                                      novel_key='target',
-                                      split=args.split_data)[0]
-    runner = Validator(model=model, 
-                        device=device, 
-                        batch_size=args.batch_size, 
-                        eval_classes=eval_classes,
-                        additional_eval_group_classes=base_classes if args.eval_base else None,
-                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
-                        logger=logger,
-                        metrics=['acc@1', 'f1'] + args.metrics,
-                        dataloader=test_loader,
-                        send_to_device=args.no_prefetch,
-                        print_freq=args.print_freq,
-                        loss_scaler=loss_scaler,
-                        amp_autocast=amp_autocast,
-                        create_report=args.create_report,
-                        **args.confmat_kwargs)
-    runner.result_suffix = 'Target'
-    test_metrics = runner.run("Target")
-    csv_summary = filewriter.update_summary(epoch='Test Target', 
-                                            metrics=test_metrics, 
-                                            root=logger.out_dir,
-                                            write_header=True)
-    print("Test evaluation with source data")
-    test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=True,
-                                      novel_key='target',
-                                      split=args.split_data)[0]
-    runner.dataloader = test_loader
-    runner.result_suffix = 'TargetSource'
-    test_metrics = runner.run("Target+Source")
-    csv_summary = filewriter.update_summary(epoch='Test Target+Source', 
-                                            metrics=test_metrics, 
-                                            root=logger.out_dir,
-                                            write_header=True)
-    # Default value from args is None (which is non Iterable)
-    add_test_desc = getattr(args, 'additional_test_desc', [])
-    add_test_desc = [] if add_test_desc is None else add_test_desc
-    for add_test_desc_name in add_test_desc:
-        print(f'Additional Test Evaluation using {add_test_desc_name}')
-        additional_test_desc = build_descriptor(fileRoot=args.root, fName=add_test_desc_name, ds_split=args.ds_split)
-        # eval_classes = [i for i in eval_classes if i in additional_test_desc.targetIDs[-1]]
-        eval_classes = list(additional_test_desc.targetIDs[-1])
+    for i, (eClasses,bClasses) in enumerate(zip(eval_class_groups, eval_base_groups)):
+        # Only print when there will be multiple eval groups otherwise might be confusing
+        if len(eval_class_groups) > 1:
+            print(f'Start test for eval groups {i}')
+            targetName = f'Target{i}'
+            targetSourceName = f'TargetSource{i}'
+        else:
+            targetName = 'Target'
+            targetSourceName = 'TargetSource'
+            
+        # Create data loader for test without source data
         test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=False)[0]
+                                        batch_size=args.batch_size,
+                                        phase='test',
+                                        device=device,
+                                        collate_fn=collate_fn,
+                                        descriptor=train_source_iter.dataset_descriptor,
+                                        include_source_val_test=False,
+                                        novel_key='target',
+                                        split=args.split_data)[0]
         runner = Validator(model=model, 
-                        device=device, 
-                        batch_size=args.batch_size, 
-                        eval_classes=eval_classes,
-                        additional_eval_group_classes=base_classes if args.eval_base else None,
-                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
-                        logger=logger,
-                        metrics=['acc@1', 'f1'] + args.metrics,
-                        dataloader=test_loader,
-                        send_to_device=args.no_prefetch,
-                        print_freq=args.print_freq,
-                        loss_scaler=loss_scaler,
-                        amp_autocast=amp_autocast,
-                        create_report=args.create_report,
-                        **args.confmat_kwargs)
-        runner.result_suffix = f'Target_{add_test_desc_name}'
-        test_metrics = runner.run("Target")
-        csv_summary = filewriter.update_summary(epoch='Test Target', 
+                            device=device, 
+                            batch_size=args.batch_size, 
+                            eval_classes=eClasses,
+                            additional_eval_group_classes=bClasses if args.eval_base else None,
+                            eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
+                            logger=logger,
+                            metrics=['acc@1', 'f1'] + args.metrics,
+                            dataloader=test_loader,
+                            send_to_device=args.no_prefetch,
+                            print_freq=args.print_freq,
+                            loss_scaler=loss_scaler,
+                            amp_autocast=amp_autocast,
+                            create_report=args.create_report,
+                            **args.confmat_kwargs)
+        runner.result_suffix = targetName
+        test_metrics = runner.run(targetName)
+        csv_summary = filewriter.update_summary(epoch=f'Test {targetName}', 
                                                 metrics=test_metrics, 
                                                 root=logger.out_dir,
                                                 write_header=True)
@@ -275,11 +263,13 @@ def main(args):
                                         device=device,
                                         collate_fn=collate_fn,
                                         descriptor=train_source_iter.dataset_descriptor,
-                                        include_source_val_test=True)[0]
+                                        include_source_val_test=True,
+                                        novel_key='target',
+                                        split=args.split_data)[0]
         runner.dataloader = test_loader
-        runner.result_suffix = f'TargetSource_{add_test_desc_name}'
-        test_metrics = runner.run("Target+Source")
-        csv_summary = filewriter.update_summary(epoch='Test Target+Source', 
+        runner.result_suffix = targetSourceName
+        test_metrics = runner.run(targetSourceName)
+        csv_summary = filewriter.update_summary(epoch=f'Test {targetSourceName}', 
                                                 metrics=test_metrics, 
                                                 root=logger.out_dir,
                                                 write_header=True)
@@ -287,6 +277,9 @@ def main(args):
         filewriter.convert_csv_to_excel(csv_summary)
     acc1 = runner.eval_acc_1
     f1 = runner.eval_f1
+    # Delete .latest checkpoint as it is not needed anymore
+    if os.path.exists(logger.get_checkpoint_path('latest')):
+        os.remove(logger.get_checkpoint_path('latest'))
     print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}, F1 on Test: {f1:3.2f}")
     print(f'Total time: {time.time() - start_time}')
     handle_aws_postprocessing(args, s3_client=s3_client, ec2_client=ec2_client)
@@ -536,8 +529,17 @@ if __name__ == '__main__':
     group.add_argument("--include-source-eval", action='store_true',
                         help='Include source domain in evaluation (validation + test).')
     group.add_argument('--confmat-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
-    group.add_argument('--additional-test-desc', type=str, nargs='*',
-                       help='Additional descriptor files to evaluate in additional test runs.')
+    group.add_argument('--eval-desc-novel', type=str, nargs='*',
+                       help='Descriptor files for novel classes to evaluate test runs. '
+                       'If not specified uses novel descriptor from training. '
+                       'Must match number of --eval-desc-shared if both specify multiple values.')
+    group.add_argument('--eval-desc-shared', type=str, nargs='*',
+                       help='Descriptor files for shared/base classes to evaluate test runs. '
+                       'If not specified uses shared descriptor from training. '
+                       'Must match number of --eval-desc-novel if both specify multiple values.')
+    group.add_argument('--eval-infer-other', action='store_true',
+                       help='Infer shared/novel classes from novel/shared and total classes during evaluation. '
+                       'Only has an effect if multiple descriptor files are used.')
     group.add_argument('--no-base-eval', action='store_true',
                        help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
     

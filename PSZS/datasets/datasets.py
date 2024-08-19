@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Iterable, Sequence, Optional, List, Tuple
 import warnings
 import math
@@ -61,6 +62,7 @@ class ConcatDataset(_ConcatDataset):
         else:
             self.all_classes : List[str] = flatten_nested_list(self.classes)
             self.num_all_classes = len(self.all_classes)
+        self.label_index = self.merge_label_index()
             
     @property
     def eval_classes(self) -> List[int]:
@@ -78,6 +80,16 @@ class ConcatDataset(_ConcatDataset):
         assert all([getattr(self.datasets[0], 'main_class_idx', -1) == getattr(ds, 'main_class_idx', -1) 
                     for ds in self.datasets]), 'All datasets must have the same main_class_idx'
         return getattr(self.datasets[0],'main_class_idx', -1)
+    
+    def merge_label_index(self) -> defaultdict:
+        """Merges the label indexes of all datasets into a single defaultdict.
+        Elements with the same key are appended to the same list.
+        """
+        index = defaultdict(list)
+        for dataset in self.datasets:
+            for key, value in dataset.label_index.items():
+                index[key].extend(value)
+        return index
             
 def get_dataset_names():
     return sorted(
@@ -137,9 +149,7 @@ def build_descriptors(fileRoot: str | PathLike[str],
                       level_names: Optional[Sequence[str]] = None,
                       ) -> Tuple[DatasetDescriptor, DatasetDescriptor]:
     """Constructs the total and novel dataset descriptors for the given dataset split.
-    
-    .. note::
-        No need for remapping or similar as there is no shared descriptors.
+    No need for remapping or similar as there is no shared descriptors.
 
     Args:
         fileRoot (str | PathLike[str]): 
@@ -288,6 +298,11 @@ def transform_target(target: torch.Tensor,
         return_np = False
     else:
         raise ValueError(f"Mode {mode} not supported")
+    
+    if target.ndim == 2:
+        # Happens when mixup/augmix is used
+        assert mode == "pred", f"Only 'pred' mode supported for 2D target tensors but got {mode}"
+        return target
     
     if hierarchy_level is not None:
         mapping = mapping[hierarchy_level]

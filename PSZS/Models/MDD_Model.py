@@ -5,7 +5,7 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 from torch.nn.modules import Module
-from tllib.modules.grl import WarmStartGradientReverseLayer
+from PSZS.Alignment import WarmStartGradientReverseLayer
 
 from PSZS.Models.CustomModel import CustomModel, PRED_TYPE
 

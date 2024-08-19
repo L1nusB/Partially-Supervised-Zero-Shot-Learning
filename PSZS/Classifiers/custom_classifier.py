@@ -19,30 +19,51 @@ class CustomClassifier(nn.Module):
                  auto_split_indices: Optional[int | Sequence[int]] = None,
                  test_head_pred_idx: Optional[int] = None,
                  num_classes_pref: str = 'inputs',
+                 hierarchy_level_names: Optional[Sequence[str]] = None,
                  head_params: dict = {},
                  ) -> None:
         """
         Args:
-            num_classes (int | np.ndarray): Number of classes for each head. Gets expanded/must match shape (num_inputs, num_head_predictions).
-            num_inputs (int): Number of inputs to the classifier during training forward pass.
-            in_features (int): Number of features before the head layer produces by the backbone.
-            head_type (Type[CustomHead]): Type of head to use. (default: ``SimpleHead``)
-            auto_split (bool): Whether to automatically split the incoming features into num_inputs parts. (default: True)
-            auto_split_indices (Optional[Sequence[int]]): Indices to split the features when auto_split is True
-            num_classes_pref (str): Whether given num_classes represent values for each input or each head prediction. \
-                Only relevant if num_classes has len(shape)=1 and num_inputs==in_features. Either 'inputs' or 'heads' (default: 'inputs')
-            test_head_pred_idx (Optional[int]): Index of the prediction the head produce to use for testing/validation. \
-                                                Must be provided when Head returns multiple outputs. (default: None)
-            head_params (dict): Keyword arguments for the head
-        
+            num_classes (int | np.ndarray): 
+                Number of classes for each head. Gets expanded/must match shape (num_inputs, num_head_predictions).
+            num_inputs (int): 
+                Number of inputs to the classifier during training forward pass.
+            in_features (int): 
+                Number of features before the head layer produces by the backbone.
+            head_type (Type[CustomHead]): 
+                Type of head to use. (default: ``SimpleHead``)
+            auto_split (bool): 
+                Whether to automatically split the incoming features into num_inputs parts. (default: True)
+            auto_split_indices (Optional[Sequence[int]]): 
+                Indices to split the features when auto_split is True
+            num_classes_pref (str): 
+                Whether given num_classes represent values for each input or each head prediction. 
+                Only relevant if num_classes has len(shape)=1 and num_inputs==in_features. 
+                Either 'inputs' or 'heads' (default: 'inputs')
+            test_head_pred_idx (Optional[int]): 
+                Index of the prediction the head produce to use for testing/validation. 
+                Must be provided when Head returns multiple outputs. (default: None)
+            hierarchy_level_names (Optional[Sequence[str]]):
+                Names of the hierarchy levels to use for specific head predictions. 
+                Only relevant for hierarchical heads if specific levels are specified using strings.
+            head_params (dict): 
+                Keyword arguments for the head
         """
         super(CustomClassifier, self).__init__()
         
-        num_head_pred = head_params[head_type.num_head_pred_key] if head_type.returns_multiple_outputs else 1
         self.head_type = head_type
         if head_type.returns_multiple_outputs:
             assert test_head_pred_idx is not None, "Head returns multiple outputs. test_head_pred_idx must be provided."
-            if head_params[head_type.num_head_pred_key] is None:
+            # If the value is None, the number of predictions is inferred from the num_classes
+            # and the resulting out_features.
+            # Resolve number of head predictions and what levels are used for the head predictions.
+            # If None are given, the number is inferred from the num_classes and all levels are used.
+            # If a integer is given, the number of predictions is set to this value and the k finest levels are used.
+            # If a sequence is given, the number of predictions is set to the length of the sequence and the levels are used as specified.
+            # in this case the key gets removed from head_params and the head sizes are inferred based on num_classes
+            # which gets masked succintly by the label_mask attribute
+            num_head_pred = head_params.get(head_type.num_head_pred_key, None)
+            if num_head_pred is None:
                 warnings.warn("Head returns multiple outputs but desired number of predictions is not provided. "
                               f"Trying to infer all available predictions shape of the dataset based on num_classes ({num_classes}). "
                               "To change the number of predictions set the desired number via "
@@ -51,9 +72,8 @@ class CustomClassifier(nn.Module):
                     case 0:
                         raise ValueError(f"num_classes ({num_classes}) is a single number. Cannot infer number of predictions.")
                     case 1:
-                        # E.g. [68, 281]
                         if num_inputs != 1:
-                            warnings.warn("num_inputs != 1 but num_classes is single array. "
+                            warnings.warn(f"num_inputs {num_inputs}!= 1 but num_classes is single array. "
                                           "Try to use len(num_classes) as number of predictions "
                                           "and expand to all inputs.")
                         num_head_pred = len(num_classes)
@@ -66,11 +86,37 @@ class CustomClassifier(nn.Module):
                                                      f"Got shape {num_classes.shape}.")
                 num_head_pred = num_classes.shape[1]
                 print(f"Using {num_head_pred} predictions based on num_classes.")
+            elif isinstance(num_head_pred, Sequence): # Use Sequence to support various formats of num_head_pred
+                # Resolve strings
+                if isinstance(num_head_pred, str):
+                    assert hierarchy_level_names is not None, "Hierarchy level names must be provided to specify specific levels as strings."
+                    # Strings are passed in a somewhat unfortunate format as '[a,b,c]'
+                    # so remove the brackets and split by comma
+                    extracted_names = num_head_pred[1:-1].split(',')
+                    validName = [name.lower() for name in hierarchy_level_names]
+                    num_head_pred = [validName.index(spec.lower()) for spec in extracted_names]
+                
+                # Hierarchy levels are assumed to be ordered and zero indexed with 0 being the coarsest level
+                if len(num_classes.shape) != 2:
+                    warnings.warn("num_classes is not of shape (num_inputs, num_head_predictions). "
+                                  "Label masking with concrete levels might not work correctly.")
+                self.label_mask = torch.tensor(num_head_pred)
+                num_head_pred = len(num_head_pred)
+                # Remove value to ensure inference of head sizes based on num_classes
+                head_params.pop(head_type.num_head_pred_key, None)
         else:
             # If head doesn't return multiple outputs, test_head_pred_idx needs to be None to avoid wrong selection of predictions
             test_head_pred_idx = None
+            num_head_pred = 1
             
         self.num_head_pred = num_head_pred
+        # Label_mask is used to select the correct labels for the head predictions
+        # and could have been set above if a specific sequence of head predictions is specified
+        if getattr(self, 'label_mask', None) is None:
+            if len(num_classes.shape) == 2:
+                self.label_mask = torch.arange(num_classes.shape[1]-num_head_pred, num_classes.shape[1])
+            else:
+                self.label_mask = torch.arange(num_head_pred)
         
         self.num_inputs = num_inputs
         
@@ -109,7 +155,10 @@ class CustomClassifier(nn.Module):
                 if num_classes.shape[1] > num_head_pred:
                     warnings.warn(f"More class levels ({num_classes.shape[1]}) are known than head predictions ({num_head_pred}). "
                                   f"Using only the last {num_head_pred} class levels.")
-                    num_classes = num_classes[:,-num_head_pred:]
+                    # Restrict num_classes to the head predictions that are actually used
+                    # also required in case a specific sequence of hierarchy levels was given to infer the correct 
+                    # head sizes
+                    num_classes = num_classes[:,self.label_mask]
                 # Already in correct shape
                 assert num_classes.shape == (num_inputs, num_head_pred), f"num_classes must be of shape ({num_inputs}, {num_head_pred}), but is {num_classes.shape}"
         self.num_classes : npt.NDArray[np.int_] = num_classes

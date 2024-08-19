@@ -45,7 +45,7 @@ class Base_Optimizer():
                  eval_metrics: Optional[Sequence[str]] = None,
                  grad_accum_steps: int = 1,
                  mixup_off_epoch: int = 0,
-                 mixup_fn: Optional[Callable] = None,
+                 mixup_fn: Optional[Callable | Sequence[Callable]] = None,
                  loss_scaler: Optional[NativeScalerMultiple] = None,
                  amp_autocast = suppress,
                  scale_loss_accum: bool = True,
@@ -56,7 +56,7 @@ class Base_Optimizer():
                  create_class_summary: bool = False,
                  feature_loss_weight: Optional[float] = None,
                  logit_loss_weight: Optional[float] = None,
-                 max_mixing_epochs: int = 10,
+                 max_mixing_epochs: int | Sequence[int] = 10,
                  ) -> None:
         self.train_iters = train_iters
         # Only allow a single validator object
@@ -98,7 +98,9 @@ class Base_Optimizer():
         self.eval_during_train = eval_during_train
         self.grad_accum_steps = grad_accum_steps
         self.mixup_off_epoch = mixup_off_epoch
-        self.mixup_fn = mixup_fn
+        # If a single mixup function is given use it for all iterators
+        # if None is specified no mixup is used and None itself is stored.
+        self.mixup_fns = [mixup_fn for _ in range(len(train_iters))] if isinstance(mixup_fn, Callable) else mixup_fn
         self.scale_loss_accum = scale_loss_accum
         self.loss_scaler = loss_scaler
         self.amp_autocast = amp_autocast
@@ -137,8 +139,19 @@ class Base_Optimizer():
                                                 class_names=class_names)
         
         # Set the max mixing steps to max_mixing_epochs epochs if not specified otherwise
+        # Use set attribute as it is not set in all strategies or in non-hierarchicals
+        # in theory one could also check for hierarchy and what strategy is used
+        # but just set it as there are no real additional costs
         if getattr(self.model, 'max_mixing_steps', None) is None:
-            setattr(self.model, 'max_mixing_steps', self.iters_per_epoch * max_mixing_epochs)
+            # No need to use a Parameter here as we already have the device and it is not optimized either way
+            if isinstance(max_mixing_epochs, int):
+                maxing_steps = torch.tensor([self.iters_per_epoch * max_mixing_epochs]*self.model.num_pred, 
+                                               device=self.device, dtype=int, requires_grad=False)
+            else:
+                assert len(max_mixing_epochs) == self.model.num_pred, f'Number of max mixing epochs ({len(max_mixing_epochs)}) must match the number of prediction heads ({self.model.num_pred}).'
+                maxing_steps = torch.tensor([self.iters_per_epoch * max_mixing_epochs[i] for i in range(self.model.num_pred)], 
+                                               device=self.device,dtype=int, requires_grad=False)
+            setattr(self.model, 'max_mixing_steps', maxing_steps)
         
     @classmethod
     def get_optim_kwargs(cls, **kwargs) -> dict:
@@ -241,42 +254,55 @@ class Base_Optimizer():
     def num_head_pred(self) -> int:
         return self.model.num_pred
     
+    @property
+    def uses_mixup(self) -> bool:
+        """Determines if mixup is used in this optimizer. Different from `apply_mixup` as this 
+        checks if mixup is used at all and not whether to apply it now.
+        """
+        if self.send_to_device:
+            return self.mixup_fns is not None
+        else:
+            if isinstance(self.train_iters, ForeverDataIterator):
+                return self.train_iters.data_loader.mixup_enabled
+            else:
+                return any([it.data_loader.mixup_enabled for it in self.train_iters])
+    @property
+    def do_mixup(self) -> bool:
+        """Determines if mixup should be applied for the current batch.
+        Can only be true when sending to the device here i.e. not using prefetch loader
+        as these apply mixup internally already.
+        """
+        if self.send_to_device:
+            return self.mixup_fns is not None
+        else:
+            return False
+    
     def _get_train_batch_sizes(self) -> int | List[int]:
         if isinstance(self.train_iters, ForeverDataIterator):
             return self.train_iters.batch_size
         else:
             return [it.batch_size for it in self.train_iters]
         
-    def _check_modify_mixup(self, disable: bool = True) -> None:
-        if disable:
-            # Turn off mixup if specified (i.e. not 0) 
-            if self.mixup_off_epoch and self.epoch > self.mixup_off_epoch:
-                # Only log once 
-                if self.epoch-1 == self.mixup_off_epoch:
-                    print('Turning off mixup (if enabled)')
-                # Prefetch Loader is used
-                if not self.send_to_device:
-                    if isinstance(self.train_iters, ForeverDataIterator):
-                        self.train_iters.data_loader.mixup_enabled = False
-                    else:
-                        for it in self.train_iters:
-                            it.data_loader.mixup_enabled = False
-                # Disable Mixup function on non-prefetch loader
-                elif self.mixup_fn is not None:
-                    self.mixup_fn.mixup_enabled = False
-        else:
-            # Turn on mixup if specified (i.e. not 0)
-            if self.mixup_off_epoch:
-                # Prefetch Loader is used
-                if not self.send_to_device:
-                    if isinstance(self.train_iters, ForeverDataIterator):
-                        self.train_iters.data_loader.mixup_enabled = False
-                    else:
-                        for it in self.train_iters:
-                            it.data_loader.mixup_enabled = False
-                # Disable Mixup function on non-prefetch loader
-                elif self.mixup_fn is not None:
-                    self.mixup_fn.mixup_enabled = False
+    def _check_modify_mixup(self) -> None:
+        """Check if mixup should be turned off and modify the mixup_fn accordingly.
+        Currently mixup can not be enabled using this method.
+        """
+        # Turn off mixup if specified (i.e. not 0) 
+        if self.mixup_off_epoch and self.epoch > self.mixup_off_epoch:
+            # Only log once 
+            if self.epoch-1 == self.mixup_off_epoch:
+                print('Turning off mixup (if enabled)')
+            # Prefetch Loader is used
+            if not self.send_to_device:
+                if isinstance(self.train_iters, ForeverDataIterator):
+                    self.train_iters.data_loader.mixup_enabled = False
+                else:
+                    for it in self.train_iters:
+                        it.data_loader.mixup_enabled = False
+            # Disable Mixup function on non-prefetch loader
+            elif self.mixup_fns is not None:
+                for mixup_fn in self.mixup_fns:
+                    mixup_fn.mixup_enabled = False
     
     ######### Metric meter functions #########      
     def _construct_default_meters(self) -> None:
@@ -682,8 +708,8 @@ class Base_Optimizer():
             # which is fine as it is questionable when one uses eval during train and then
             # why also look at other levels which are not predicted.
             if self.multiple_outputs:
-                labels = [l[:,-self.num_head_pred:] for l in labels]
-                interal_labels = [l[:,-self.num_head_pred:] for l in interal_labels]
+                labels = [l[:,self.model.classifier.label_mask] for l in labels]
+                interal_labels = [l[:,self.model.classifier.label_mask] for l in interal_labels]
             
             # Compute Loss and update meters
             # Pass mapped labels to compute loss.
@@ -748,7 +774,6 @@ class Base_Optimizer():
             
             # Load Data
             data, labels = self._load_data_train()
-            
             # Forward pass, Compute Loss and Param update
             self._train_computation(data=data, 
                                     labels=labels, 

@@ -310,7 +310,7 @@ class Base_Single(Base_Optimizer):
     def _compute_loss_cls(self, 
                           pred: SINGLE_TRAIN_PRED_TYPE, 
                           target: torch.Tensor) -> torch.Tensor:
-        loss, _ = self.model.compute_cls_loss(pred, target)
+        loss, _ = self.model.compute_cls_loss(pred, target, mixup=self.uses_mixup)
         
         self.meter_cls_loss.update(val=loss.item(), n=self.batch_size)
         return loss

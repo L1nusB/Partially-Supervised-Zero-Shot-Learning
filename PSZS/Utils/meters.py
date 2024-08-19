@@ -1,5 +1,5 @@
 from numbers import Number
-from typing import Optional, Sequence, Any
+from typing import Optional, Self, Sequence, Any
 import numpy as np
 import warnings
 import torch
@@ -466,7 +466,10 @@ class ProgressMeter:
                  prefix : str=""):
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
         self.meters = meters
+        self.num_batches = num_batches
+        self._batch_meters = batch_meters
         self.batch_meters = [meter.name for meter in batch_meters] if batch_meters else []
+        self._exclude_simple_reset = exclude_simple_reset
         self.exclude_simple_reset = [meter.name for meter in exclude_simple_reset] if exclude_simple_reset else []
         self.prefix = prefix
 
@@ -485,10 +488,10 @@ class ProgressMeter:
                   batch_meter: bool = False,
                   exclude_simple_reset: bool = False):
         if isinstance(meters, _BaseMeter):
-            if meters in self.meters:
-                print(f"Meter with name {meters.name} already in meters. Nothing added.")
-            else:
-                self.meters.append(meters)
+            # if meters in self.meters:
+            #     print(f"Meter with name {meters.name} already in meters. Nothing added.")
+            # else:
+            self.meters.append(meters)
             if batch_meter:
                 self.batch_meters.append(meters.name)
             if exclude_simple_reset:
@@ -518,6 +521,7 @@ class ProgressMeter:
             self.exclude_simple_reset.remove(meter.name)
     
     def set_num_batches(self, num_batches: int):
+        self.num_batches = num_batches
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
 
     def reset(self, reset_all: bool = True):
@@ -530,3 +534,17 @@ class ProgressMeter:
                         meter.reset_batch()
                     else:
                         meter.reset()
+                        
+    def copy(self):
+        """Returns a new independent ProgressMeter with all the meters and configurations 
+        of the current object. Meters are not copied but referenced differentiating this copy from deep copy.
+        """
+        # Do not use self.meters directly as otherwise all modifications will influence the original objects
+        meters = [m for m in self.meters]
+        batch_meters = [m for m in self._batch_meters] if self._batch_meters else None
+        exclude_simple_reset = [m for m in self._exclude_simple_reset] if self._exclude_simple_reset else None
+        return ProgressMeter(num_batches=self.num_batches,
+                             meters=meters,
+                             batch_meters=batch_meters,
+                             exclude_simple_reset=exclude_simple_reset,
+                             prefix=self.prefix)

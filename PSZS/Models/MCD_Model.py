@@ -104,14 +104,14 @@ class MCD_Model(CustomModel):
         return [create_optimizer_v2(model_or_params=self.model_or_params(type='backbone'), **params),
                 create_optimizer_v2(model_or_params=self.model_or_params(type='cls'), **params)]
                     
-    def forward(self, x: torch.Tensor) -> Tuple[PRED_TYPE, PRED_TYPE] | torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[Tuple[PRED_TYPE, PRED_TYPE], torch.Tensor] | torch.Tensor:
         """During training additionally return predictions of both classifiers."""
         f = self.backbone(x)
         f = self.bottleneck(f)
         if self.training:
             predictions_1 = self.classifier(f)
             predictions_2 = self.classifier_2(f)
-            return predictions_1, predictions_2
+            return (predictions_1, predictions_2), f
         else:
             predictions = self.classifier.forward_test(f)
             return predictions

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Any
 
@@ -19,6 +20,7 @@ class CUB(CustomDataset):
                  split: Optional[int] = None, 
                  descriptor: Optional[DatasetDescriptor] = None,
                  descriptor_file: Optional[str] = None,
+                 label_index: bool = False,
                  transform: Optional[Callable] = None, 
                  annfile_dir: str = 'annfiles',
                  phase: Optional[str] = None,
@@ -45,6 +47,7 @@ class CUB(CustomDataset):
                                   annfile_path=annfile_path,
                                   descriptor=descriptor,
                                   descriptor_file=descriptor_file,
+                                  label_index=label_index,
                                   transform=transform)
         
         # The index in the target label corresponding to the main class
@@ -61,6 +64,10 @@ class CUB(CustomDataset):
             print(f"Main class ({main_class_idx}) is not the most detailed class ({self.most_detailed_class}). "
                   f"Using specified main class ({main_class_idx}) as highest detail class.")
             self.most_detailed_class = main_class_idx
+        
+        if label_index:
+            # Call (again) after setting main_class_idx to populate label_index    
+            self.label_index = self.build_label_index()
             
     @property
     def id_to_name(self) -> List[Dict[int, str]]:
@@ -100,7 +107,7 @@ class CUB(CustomDataset):
     def num_classes(self) -> List[int]:
         """Number of classes for each level"""
         return self.descriptor.num_classes
-            
+    
     def parse_data_file(self, file_name: str, 
                         main_sep: str = '=', 
                         sub_sep: str = "#") -> List[Tuple[str, List[int], List[str]]]:

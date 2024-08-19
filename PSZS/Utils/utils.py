@@ -7,7 +7,7 @@ from functools import partial
 import os.path as osp
 import os
 import psutil
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, overload
 import argparse
 import ast
 import warnings
@@ -73,6 +73,27 @@ def setup_device(args: Optional[argparse.Namespace]=None,
         device = torch.device('cpu')
     return device
 
+def send_to_device(tensor: torch.Tensor, device) -> torch.Tensor:
+    """
+    Recursively sends the elements in a nested list/tuple/dictionary of tensors to a given device.
+
+    Args:
+        tensor (nested list/tuple/dictionary of :obj:`torch.Tensor`):
+            The data to send to a given device.
+        device (:obj:`torch.device`):
+            The device to send the data to
+
+    Returns:
+        The same data structure as :obj:`tensor` with all tensors sent to the proper device.
+    """
+    if isinstance(tensor, (list, tuple)):
+        return type(tensor)(send_to_device(t, device) for t in tensor)
+    elif isinstance(tensor, dict):
+        return type(tensor)({k: send_to_device(v, device) for k, v in tensor.items()})
+    elif not hasattr(tensor, "to"):
+        return tensor
+    return tensor.to(device)
+
 def calculate_learning_rate(args:argparse.Namespace) -> float:
     # If lr is set directly do not touch
     if args.lr:
@@ -98,14 +119,27 @@ def preview_lr_schedule(scheduler: Scheduler, num_steps: int = None):
     for i in range(num_steps):
         print(f"{i}: {scheduler._get_lr(i)}")
 
+@overload
 def setup_mixup_cutmix(args: argparse.Namespace,
-                       num_classes: int) -> Tuple[FastCollateMixup, Mixup]:
+                       num_classes: int) -> Tuple[FastCollateMixup, Mixup]:...
+@overload
+def setup_mixup_cutmix(args: argparse.Namespace,
+                       num_classes: Sequence[int]) -> Tuple[Sequence[FastCollateMixup], Sequence[Mixup]]:...
+def setup_mixup_cutmix(args: argparse.Namespace,
+                       num_classes: int | Sequence[int]
+                       ) -> Tuple[FastCollateMixup, Mixup] | Tuple[Sequence[FastCollateMixup], Sequence[Mixup]]:
     # setup mixup / cutmix
+    single_return = isinstance(num_classes, int)
+    if single_return:
+        num_classes = [num_classes]
+    collates = []
+    mixups = []
     collate_fn = None
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active:
-        raise NotImplementedError(f"Mixup/Cutmix not implemented/tested with new mapping functions.")
+        # Due to the way the datasets are actually zero-indexed in ascending order this should work anyways
+        warnings.warn("Mixup/Cutmix not tested/validated with internal mapping functions.")
         mixup_args = dict(
             mixup_alpha=args.mixup,
             cutmix_alpha=args.cutmix,
@@ -114,13 +148,22 @@ def setup_mixup_cutmix(args: argparse.Namespace,
             switch_prob=args.mixup_switch_prob,
             mode=args.mixup_mode,
             label_smoothing=args.smoothing,
-            num_classes=num_classes
         )
-        if not args.no_prefetch:
-            collate_fn = FastCollateMixup(**mixup_args)
-        else:
-            mixup_fn = Mixup(**mixup_args)
-    return collate_fn, mixup_fn
+        for nc in num_classes:
+            mixup_args['num_classes'] = nc
+            if not args.no_prefetch:
+                collate_fn = FastCollateMixup(**mixup_args)
+            else:
+                mixup_fn = Mixup(**mixup_args)
+            collates.append(collate_fn)
+            mixups.append(mixup_fn)
+    else:
+        return None, None
+        
+    if single_return:
+        return collates[0], mixups[0]
+    else:
+        return collates, mixups
 
 def setup_amp(args: argparse.Namespace,
               device: torch.device) -> Tuple[suppress | torch.autocast, None | NativeScalerMultiple]:

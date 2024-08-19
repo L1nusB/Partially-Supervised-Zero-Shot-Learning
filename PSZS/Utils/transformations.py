@@ -4,10 +4,31 @@ from typing import Tuple, Optional, Sequence, Union
 import torchvision.transforms as T
 from timm.data.auto_augment import auto_augment_transform, rand_augment_transform
 
-from tllib.vision.transforms import ResizeImage
-
 DEFAULT_SCALE = [0.08, 1.0]
 DEFAULT_RATIO = [3. / 4., 4. / 3.]
+
+class ResizeImage(object):
+    """Resize the input PIL Image to the given size.
+
+    Args:
+        size (sequence or int): Desired output size. If size is a sequence like
+          (h, w), output size will be matched to this. If size is an int,
+          output size will be (size, size)
+    """
+
+    def __init__(self, size):
+        if isinstance(size, int):
+            self.size = (int(size), int(size))
+        else:
+            self.size = size
+
+    def __call__(self, img):
+        th, tw = self.size
+        return img.resize((th, tw))
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(size={0})'.format(self.size)
+
 
 def _get_resizing_transform(mode: str = 'default', pre_crop_size: Union[int, Sequence] = 256, 
                             resize_size: Union[int, Sequence] = 224, 

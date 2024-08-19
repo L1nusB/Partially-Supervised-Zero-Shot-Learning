@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from PSZS.Metrics import binary_accuracy, binary_accuracy_with_logits, accuracy
 from PSZS.Models.funcs import entropy
-from PSZS.Alignment.gradientReversalLayer import WarmStartGradientReverseLayer
+from PSZS.Alignment import WarmStartGradientReverseLayer
 
 
 __all__ = ['ConditionalDomainAdversarialLoss']

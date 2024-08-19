@@ -59,6 +59,7 @@ def main(args):
         
     args.amp = not args.no_amp
     args.eval_base = not args.no_base_eval
+    args.split_data = not args.no_split_data
         
     # Setup amp for mixed precision training
     amp_autocast, loss_scaler = setup_amp(args=args, device=device)
@@ -92,7 +93,7 @@ def main(args):
     print(f"Batch size: {args.batch_size}")
     # If no explicit task from user, use target_novel as tasks
     if args.tasks is None:
-        args.tasks = getattr(args, 'target_novel', getattr(args, 'target'))
+        args.tasks = getattr(args, 'target_novel', getattr(args, 'target', None))
         assert args.tasks is not None, "No tasks specified for evaluation."
         
     test_loader : DataLoader = create_data_objects(args=args, 
@@ -284,7 +285,7 @@ def main(args):
                                                 start_class=-len(e_classes),)
         if 'full' in args.eval_groups or 'all' in args.eval_groups:
             print("Validation on only novel, shared, and source set")
-            args.tasks = args.source + args.target_shared + getattr(args, 'target_novel', getattr(args, 'target'))
+            args.tasks = args.source + args.target_shared + getattr(args, 'target_novel', getattr(args, 'target', None))
             test_loader : DataLoader = create_data_objects(args=args, 
                                                             batch_size=args.batch_size,
                                                             phase='custom_test',
@@ -336,6 +337,9 @@ if __name__ == '__main__':
     group.add_argument('--ds-split', type=str, default=None,
                        help='Which split of the dataset should be used. Gets appended to annfile dir. Default None.')
     group.add_argument('--num-classes', type=int, nargs='+')
+    group.add_argument('--no-split-data', action='store_true',
+                       help='Split data (source and target domain) into train/val/test. Default: False')
+    
     # Data Loader
     group = parser.add_argument_group('Dataloader')
     group.add_argument("--no-prefetch", action='store_true',

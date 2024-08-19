@@ -1,17 +1,17 @@
 from typing import Callable, Iterable, Sequence, Tuple, Optional
 from functools import partial
+import warnings
 
 import torch
 from torch.utils.data.dataset import IterableDataset
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.dataloader import default_collate, T_co
 
 from timm.data.loader import fast_collate, _worker_init, PrefetchLoader
 
-from tllib.utils.data import send_to_device
-
 from PSZS.datasets.datasets import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from PSZS.datasets import DatasetDescriptor
+from PSZS.Utils import send_to_device
 
 def build_dataloader(
         dataset,
@@ -30,8 +30,9 @@ def build_dataloader(
         device: torch.device = torch.device('cuda'),
         use_prefetcher: bool = True,
         shuffle: Optional[bool] = None,
-        drop_last: Optional[bool] = None,
-        persistent_workers: bool = True
+        drop_last: bool = False,
+        persistent_workers: bool = True,
+        batch_sampler: Optional[Sampler | Iterable] = None,
 ):
     """
 
@@ -54,6 +55,7 @@ def build_dataloader(
         shuffle: Shuffle data in dataloader. If not set defaults to 'is_training'
         drop_last: Drop last batch if not of batch_size. If not set defaults to 'is_training'
         persistent_workers: Enable persistent worker processes.
+        batch_sampler: Sampler to use for dataloader.
     Returns:
         DataLoader
     """
@@ -63,15 +65,36 @@ def build_dataloader(
         collate_fn = fast_collate if use_prefetcher else default_collate
 
     loader_class = DataLoader
+    
+    # Shuffler, Drop_last and batch_size are mutually exclusive with Batch_Sampler
+    # Batch_Sampler has higher priority everything else.
+    # Otherwise shuffler and drop_last are set based on is_training (if not given otherwise)
+    if batch_sampler is not None:
+        if shuffle or is_training:
+            # Warning vs just printing as info
+            if shuffle is None:
+                print("Batch Sampler is given, shuffle will be set to False.")
+            else:
+                warnings.warn("Batch Sampler is given, shuffle will be set to False.")
+            shuffle = False
+        if drop_last or is_training:
+            # Warning vs just printing as info
+            if drop_last is None:
+                print("Batch Sampler is given, drop_last will be set to False.")
+            else:
+                warnings.warn("Batch Sampler is given, drop_last will be set to False.")
+            drop_last = False
+        batch_size = 1 # Default value for batch_size in DataLoader class
 
     loader_args = dict(
         batch_size=batch_size,
-        shuffle=shuffle if shuffle is not None else is_training,
+        shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        drop_last=drop_last if drop_last is not None else is_training,
+        drop_last=drop_last,
         worker_init_fn=partial(_worker_init, worker_seeding='all'),
-        persistent_workers=persistent_workers
+        persistent_workers=persistent_workers,
+        batch_sampler=batch_sampler,
     )
     try:
         loader = loader_class(dataset, **loader_args)
@@ -149,9 +172,16 @@ class ForeverDataIterator:
     def batch_size(self) -> int:
         # Prefetch Loader do not have a direct batch_size attribute
         if isinstance(self.data_loader, PrefetchLoader):
-            return self.data_loader.loader.batch_size
+            bs = self.data_loader.loader.batch_size
+            # When batch_sampler is used directly retrieve it from there
+            if bs is None:
+                bs = getattr(self.data_loader.loader.batch_sampler, 'batch_size', None)
         else:
-            return self.data_loader.batch_size
+            bs = self.data_loader.batch_size
+            # When batch_sampler is used directly retrieve it from there
+            if bs is None:
+                bs = getattr(self.data_loader.batch_sampler, 'batch_size', None)
+        return bs
     
     def get_num_classes(self) -> int:
         if getattr(self.dataset, 'num_all_classes', None) is not None:

@@ -1,6 +1,6 @@
 import time
 
-from typing import List, Optional, Set, Tuple, Sequence, overload
+from typing import Callable, List, Optional, Set, Tuple, Sequence, overload
 from collections import OrderedDict
 import warnings
 
@@ -122,6 +122,7 @@ class Base_Multiple(Base_Optimizer):
         self.train_batch_sizes: List[int]
         self.hierarchy_levels : List[int | None]
         self.train_iters : List[ForeverDataIterator]
+        self.mixup_fns : Optional[Sequence[Callable]]
         # Avoid checks on every data load call
         if self.send_to_device:
             self._load_data = self._load_data_send_to_device
@@ -265,8 +266,8 @@ class Base_Multiple(Base_Optimizer):
         x = [e.to(self.device) for e in x]
         labels = [l.to(self.device) for l in labels]
         # Use mixup (if given)
-        if self.mixup_fn is not None:
-            x, labels = zip(*[self.mixup_fn(x[i], labels[i]) for i in range(len(x))])
+        if self.do_mixup:
+            x, labels = zip(*[mixup_fn(dat, lab) for dat, lab, mixup_fn in zip(x, labels, self.mixup_fns)])
         data_load_time = time.time()
         self.data_time.update(data_load_time - self.last_time_mark)
         self.last_time_mark = data_load_time
@@ -350,7 +351,7 @@ class Base_Multiple(Base_Optimizer):
     def _compute_loss_cls(self, 
                           pred: TRAIN_PRED_TYPE, 
                           target: Tuple[torch.Tensor,...]) -> torch.Tensor:
-        loss, loss_components = self.model.compute_cls_loss(pred, target)
+        loss, loss_components = self.model.compute_cls_loss(pred, target, mixup=self.uses_mixup)
         
         # In case of uneven split between source and target shared we have to scale the loss
         # and set the number of samples based on the actual counts

@@ -8,6 +8,7 @@ from .MCD_Model import MCD_Model
 from .MDD_Model import MDD_Model
 from .UJDA_Model import UJDA_Model
 from .PAN_Model import PAN_Model
+
 # Put this here instead of in models.py to avoid circular imports
 METHOD_MODEL_MAP : Dict[str, CustomModel] = {
     'erm': CustomModel,

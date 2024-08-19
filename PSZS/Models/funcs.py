@@ -1,6 +1,6 @@
 import math
 from numbers import Number
-from typing import Callable, Sequence, Optional, Tuple
+from typing import Callable, Literal, Sequence, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -186,6 +186,10 @@ def kl_div(p: torch.Tensor, q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
     return [(p * (p / q).log()).sum(dim=1), (q * (q / p).log()).sum(dim=1)]
 
 ### Misc function ###
+def zero(*args, **kwargs) -> Literal[0]:
+    """A function that always returns 0 and does nothing."""
+    return 0
+
 def pad(x: torch.Tensor, pad_size: int) -> torch.Tensor:
     """Pads the given tensor with zeros to the specified size.
     The zeros are appended to the right in the last dimension.

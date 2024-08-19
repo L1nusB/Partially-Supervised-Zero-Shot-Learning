@@ -16,6 +16,7 @@ class DefaultClassifier(CustomClassifier):
                  auto_split: bool = True,
                  auto_split_indices: Optional[Sequence[int]] = None,
                  test_head_pred_idx: Optional[int] = -1,
+                 hierarchy_level_names: Optional[Sequence[str]] = None,
                  num_classes_pref: str = 'inputs',
                  allow_mix_num_classes: bool = False,
                  allow_non_strict_num_classes_order: bool = True,
@@ -54,6 +55,7 @@ class DefaultClassifier(CustomClassifier):
                                                 auto_split_indices=auto_split_indices,
                                                 num_classes_pref=num_classes_pref,
                                                 test_head_pred_idx=test_head_pred_idx,
+                                                hierarchy_level_names=hierarchy_level_names,
                                                 head_params=head_params,
                                                 )
         self.allow_mix_num_classes = allow_mix_num_classes

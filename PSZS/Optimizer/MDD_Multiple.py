@@ -4,7 +4,7 @@ from typing import Iterable, Optional, Tuple, Sequence, overload
 
 import torch
 
-from tllib.alignment.mdd import ClassificationMarginDisparityDiscrepancy
+from PSZS.Alignment.mdd import ClassificationMarginDisparityDiscrepancy
 
 from torch.utils.data import DataLoader
 

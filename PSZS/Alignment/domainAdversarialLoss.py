@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tllib.modules.grl import WarmStartGradientReverseLayer
 from PSZS.Metrics import binary_accuracy, binary_accuracy_with_logits, accuracy
+from PSZS.Alignment.gradientReversalLayer import WarmStartGradientReverseLayer
 
 __all__ = ['DomainAdversarialLoss']
 

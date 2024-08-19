@@ -470,14 +470,14 @@ class Validator():
                                                         show_class_names=True,
                                                         overall_stats={'Overall ACC@5': self.cls_acc_5[j] / 100})
         
-        if self.single_eval_class:
-            # Need to index eval_classes as they are uniform List[List[int]]
-            self.confusion_matrix.save_reduced_conf(last_relevant=-len(self.eval_classes[0]),
-                                                    sheet_name=self.result_suffix,
-                                                    **self.reduced_confmat_params)
-        else:
-            for e_classes, name in zip(self.eval_classes, self.eval_groups_names):
-                self.confusion_matrix.save_reduced_conf(last_relevant=-len(e_classes),
-                                                        sheet_name=f'{name}{self.result_suffix}',
-                                                        **self.reduced_confmat_params)
+        # if self.single_eval_class:
+        #     # Need to index eval_classes as they are uniform List[List[int]]
+        #     self.confusion_matrix.save_reduced_conf(last_relevant=-len(self.eval_classes[0]),
+        #                                             sheet_name=self.result_suffix,
+        #                                             **self.reduced_confmat_params)
+        # else:
+        #     for e_classes, name in zip(self.eval_classes, self.eval_groups_names):
+        #         self.confusion_matrix.save_reduced_conf(last_relevant=-len(e_classes),
+        #                                                 sheet_name=f'{name}{self.result_suffix}',
+        #                                                 **self.reduced_confmat_params)
         return self.metric_dict

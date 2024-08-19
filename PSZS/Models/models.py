@@ -2,13 +2,12 @@
 # see https://stackoverflow.com/questions/39740632/python-type-hinting-without-cyclic-imports
 from __future__ import annotations 
 from argparse import Namespace
-from typing import Optional, Type, TYPE_CHECKING
+from typing import Optional, Sequence, Type, TYPE_CHECKING
 import warnings
 import os
 import shutil
 
 import timm
-import tllib.vision.models as models
 import torch
 import numpy as np
 import numpy.typing as npt
@@ -33,11 +32,7 @@ def get_model_type(method: str) -> Optional[Type[CustomModel]]:
     return None
 
 def get_model_names():
-    return sorted(
-        name for name in models.__dict__
-        if name.islower() and not name.startswith("__")
-        and callable(models.__dict__[name])
-    ) + timm.list_models()
+    return timm.list_models()
     
 def load_checkpoint(model: torch.nn.Module,
                     checkpoint_path: str,
@@ -169,13 +164,13 @@ def load_backbone(model_name: str,
         if freeze_depth is not None:
             freeze_layers(backbone, model_name, freeze_depth)
         
-    elif source == "local":
-        # Local models must support reset_classifier method. Otherwise an exception will be thrown
-        if model_name in models.__dict__:
-            # load models from tllib.vision.models
-            backbone = models.__dict__[model_name](pretrained=pretrain)
-        else:
-            raise NotImplementedError(f'Model {model_name} not in local models.')
+    # elif source == "local":
+    #     # Local models must support reset_classifier method. Otherwise an exception will be thrown
+    #     if model_name in models.__dict__:
+    #         # load models from tllib.vision.models
+    #         backbone = models.__dict__[model_name](pretrained=pretrain)
+    #     else:
+    #         raise NotImplementedError(f'Model {model_name} not in local models.')
     else:
         raise NotImplementedError(f'Not supported source {source}')
     return backbone
@@ -199,20 +194,32 @@ def build_model(backbone: torch.nn.Module,
                 head_type: str = "SimpleHead",
                 method: str = "erm",
                 bottleneck_dim: Optional[int] = None,
+                hierarchy_level_names: Optional[Sequence[str]] = None,
                 **model_and_classifier_kwargs) -> CustomModel:
     """Construct a Custom model with a given backbone and specified head
     Args:
-        backbone (nn.Module): Backbone of the CustomModel
-        device (torch.device): device to send the model to
-        num_classes (np.ndarray): Number of classes. During model construction gets expanded to (num_inputs, num_head_predictions).
-        num_inputs (int): Number of inputs to the classifier during training forward pass.
-        args (Optional[Namespace]): Arguments for the model. \
-            Overwrites values by other arguments. Defaults to None.
-        classifier_type (Optional[str], optional): Classifier type for custom model. If None just use backbone. Defaults to None.
-        head_type (str): Type of the head to use in custom model. Defaults to 'SimpleHead'.
-        method (str): Type of the method used to resolve which model to build. Defaults to 'erm'.
-        model_and_classifier_kwargs (dict): Keyword arguments for the Custom model, classifier and used head_type. \
+        backbone (nn.Module): 
+            Backbone of the CustomModel
+        device (torch.device): 
+            device to send the model to
+        num_classes (np.ndarray): 
+            Number of classes. During model construction gets expanded to `(num_inputs, num_head_predictions)`.
+        num_inputs (int): 
+            Number of inputs to the classifier during training forward pass.
+        args (Optional[Namespace]): 
+            Arguments for the model. Overwrites values by other arguments. Defaults to None.
+        classifier_type (Optional[str], optional): 
+            Classifier type for custom model. If None just use backbone. Defaults to None.
+        head_type (str): 
+            Type of the head to use in custom model. Defaults to `SimpleHead`.
+        method (str): 
+            Type of the method used to resolve which model to build. Defaults to `erm`.
+        model_and_classifier_kwargs (dict): 
+            Keyword arguments for the Custom model, classifier and used head_type. 
             classifier_kwargs are filtered out and passed on.
+        hierarchy_level_names (Optional[Sequence[str]]):
+                Names of the hierarchy levels to use for specific head predictions. 
+                Only relevant for hierarchical heads if specific levels are specified using strings.
         
         Relevant classifier_kwargs:
         - num_heads (Optional[int]): Number of heads
@@ -296,6 +303,7 @@ def build_model(backbone: torch.nn.Module,
                 bottleneck_dim=bottleneck_dim,
                 opt_kwargs=opt_kwargs,
                 sched_kwargs=sched_kwargs,
+                hierarchy_level_names=hierarchy_level_names,
                 **model_kwargs,
                 **classifier_kwargs
                 ).to(device)

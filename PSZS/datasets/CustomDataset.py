@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import inspect
 from typing import Dict, Optional, Callable, Sequence, Set, Tuple, Any, List
@@ -236,9 +237,9 @@ class DatasetDescriptor:
                         sub_sep: str = "#") -> List[Tuple[List[int], List[str]]]:
         """Parse file to data list with custom Dataset Descriptor file Format
         Expected format:
-        [ClassIndices]=[ClassNames]
+        [ClassIndices]`main_sep`[ClassNames]
 
-        Within [ClassIndices] and [ClassNames] multiple fields can be set by [sub_sep] separator. 
+        Within [ClassIndices] and [ClassNames] multiple fields can be set by `sub_sep` separator. 
 
         Args:
             file_name (str): The path of data file
@@ -246,7 +247,7 @@ class DatasetDescriptor:
             sub_sep (str): Separator to split within fields. Defaults to '#'
             
         Returns:
-            List[Tuple[List[int], List[str]]: List of (class_indices, class_names) tuples
+            List(Tuple[List[int], List[str]]): List of (class_indices, class_names) tuples
         """
         with open(file_name, "r", encoding='utf8') as f:
             data_list = []
@@ -302,12 +303,17 @@ class CustomDataset(datasets.VisionDataset):
                  descriptor: Optional[DatasetDescriptor] = None,
                  descriptor_file: Optional[str] = None,
                  hierarchy_levels: Optional[int] = None,
+                 label_index: bool = False,
                  classes: Optional[List[str]] = None, 
                  transform: Optional[Callable] = None, 
                  target_transform: Optional[Callable] = None):
         super().__init__(root, transform=transform, target_transform=target_transform)
         self.samples = self.parse_data_file(annfile_path)
         self.targets = [s[1] for s in self.samples]
+        self.label_index = defaultdict(list)
+        if label_index:
+            self.label_index = self.build_label_index()
+        
         self.loader = default_loader
         self.annfile_path = annfile_path
         if descriptor is not None:
@@ -345,6 +351,20 @@ class CustomDataset(datasets.VisionDataset):
 
     def __len__(self) -> int:
         return len(self.samples)
+    
+    def build_label_index(self) -> defaultdict:
+        index = defaultdict(list)
+        if hasattr(self, 'main_class_idx'):
+            for i, target in enumerate(self.targets):
+                index[target[self.main_class_idx]].append(i)
+        else:
+            try:
+                for i, target in enumerate(self.targets):
+                    index[target].append(i)
+            except:
+                # Do nothing and return empty index
+                index = defaultdict(list)
+        return index
 
     def parse_data_file(self, file_name: str) -> List[Tuple[str, int]]:
         """Parse file to data list

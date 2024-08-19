@@ -20,6 +20,7 @@ class SeparatedClassifier(CustomClassifier):
                  num_classes_pref: str = 'inputs',
                  test_head_idx: int = 0,
                  test_head_pred_idx: Optional[int] = -1,
+                 hierarchy_level_names: Optional[Sequence[str]] = None,
                  share_coarse_heads: bool = True,
                  head_params: dict = {},
                  ) -> None:
@@ -54,6 +55,7 @@ class SeparatedClassifier(CustomClassifier):
                                                   auto_split_indices=auto_split_indices,
                                                   num_classes_pref=num_classes_pref,
                                                   test_head_pred_idx=test_head_pred_idx,
+                                                  hierarchy_level_names=hierarchy_level_names,
                                                   head_params=head_params,
                                                   )
         

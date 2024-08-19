@@ -21,6 +21,7 @@ class MaskedClassifier(CustomClassifier):
                  auto_split_indices: Optional[Sequence[int]] = None,
                  num_classes_pref: str = 'inputs',
                  test_head_pred_idx: Optional[int] = -1,
+                 hierarchy_level_names: Optional[Sequence[str]] = None,
                  allow_mix_num_classes: bool = False,
                  allow_non_strict_num_classes_order: bool = True,
                  head_params: dict = {},
@@ -57,6 +58,7 @@ class MaskedClassifier(CustomClassifier):
                                                auto_split_indices=auto_split_indices,
                                                num_classes_pref=num_classes_pref,
                                                test_head_pred_idx=test_head_pred_idx,
+                                               hierarchy_level_names=hierarchy_level_names,
                                                head_params=head_params,
                                                )
         self.allow_mix_num_classes = allow_mix_num_classes
@@ -64,20 +66,7 @@ class MaskedClassifier(CustomClassifier):
 
         self.head = head_type(in_features=self.in_features, 
                               out_features=self.largest_head_num_classes, 
-                              **head_params)
-    
-    # def _get_effective_head_pred_size(self) -> torch.Tensor: 
-    #     """Currently only a wrapper around num_classes.
-    #     Also turns it into a tensor.
-    #     Not sure how necessary this is. Mainly used in Base_Multiple for eval train components of F1"""
-    #     return torch.tensor(self.num_classes)
-    #     # if self.head_type.returns_multiple_outputs == False:
-    #     #     # If the head returns a single output, num_classes has shape (num_inputs,1) (e.g. [[281],[251]])
-    #     #     # Thus remove extra dimension via squeeze (e.g. [281, 251])
-    #     #     # Only along axis one so that [[281]] becomes [281] and not 281
-    #     #     return self.num_classes.squeeze(axis=1)
-    #     # else:
-    #     #     return self.num_classes[:, self.test_head_pred_idx]      
+                              **head_params)    
 
     def forward(self, 
                 f: torch.Tensor | Sequence[torch.Tensor], 

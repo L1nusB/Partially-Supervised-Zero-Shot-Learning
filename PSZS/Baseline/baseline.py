@@ -5,6 +5,7 @@ import time
 import json
 import math
 import numpy as np
+import os
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -23,6 +24,8 @@ from PSZS.datasets import build_remapped_descriptors, build_descriptor
 import PSZS.Utils.utils as utils
 from PSZS.AWS import setup_aws, handle_aws_postprocessing
 
+HIERARCHICAL_HEAD = ['HierarchicalHead']
+
 def main(args):
     setup_success, ec2_client, s3_client = setup_aws(args)
     if setup_success==False:
@@ -40,19 +43,30 @@ def main(args):
     
     args.grad_accum_steps = max(1, args.grad_accum_steps)
     args.lr = utils.calculate_learning_rate(args)
+    is_hierarchical = args.head_type in HIERARCHICAL_HEAD
     # Check if the dataset is hierarchical but the head is not (and the other way around)
     # switch to the correct dataset
-    if args.data == 'CompCarsHierarchy' and args.head_type != 'HierarchicalHead':
+    if args.data == 'CompCarsHierarchy' and not is_hierarchical:
         warnings.warn(f"CompCarsHierarchy dataset is used but head_type ({args.head_type}) is not hierarchical. "
                       "Automatically switching to (CompCarsModel) dataset")
         args.data = 'CompCarsModel'
-    elif args.data == 'CompCarsModel' and args.head_type == 'HierarchicalHead':
+    elif args.data == 'CompCarsModel' and is_hierarchical:
         warnings.warn(f"CompCarsModel dataset is used but head_type ({args.head_type}) is hierarchical. "
                       "Automatically switching to (CompCarsHierarchy) dataset")
         args.data = 'CompCarsHierarchy'
+    elif args.data == 'CUBHierarchy' and not is_hierarchical:
+        warnings.warn(f"CUBHierarchy dataset is used but head_type ({args.head_type}) is not hierarchical. "
+                        "Automatically switching to (CUBSpecies) dataset")
+        args.data = 'CUBSpecies'
+    elif args.data == 'CUBSpecies' and is_hierarchical:
+        warnings.warn(f"CUBSpecies dataset is used but head_type ({args.head_type}) is hierarchical. "
+                        "Automatically switching to (CUBHierarchy) dataset")
+        args.data = 'CUBHierarchy'
     
     args.amp = not args.no_amp
     args.eval_base = not args.no_base_eval
+    args.aug_source = not args.no_aug_source
+    args.aug_target = not args.no_aug_target
 
     print(args)
     
@@ -82,8 +96,6 @@ def main(args):
         # --> Maybe once we can remove that part we can just keep it as the full entry
         args.resize_size = data_config['input_size'][-1]
     
-    # Currently mixup/cutmix does not work with the new mapping functions
-    collate_fn, mixup_fn = utils.setup_mixup_cutmix(args, num_classes=281)
     
     bs_source = math.floor(args.batch_size * args.batch_split_ratio)
     bs_target = args.batch_size - bs_source
@@ -102,23 +114,31 @@ def main(args):
     eval_classes = list(novel_descriptor.targetIDs[-1])
     base_classes = list(shared_descriptor.targetIDs[-1])
     
+    collate_fns, mixup_fns = utils.setup_mixup_cutmix(args, num_classes=[total_descriptor.num_classes[-1], 
+                                                                       shared_descriptor.num_classes[-1]])
+    
+    if is_hierarchical and (collate_fns is not None or mixup_fns is not None):
+        warnings.warn("Mixup/Cutmix is not supported for hierarchical heads. Disabling.")
+        collate_fns = mixup_fns = None
+    
     # Create data iterators for train (Batch size is split between source and target shared domain)
     train_source_iter, train_target_iter = create_data_objects(args=args, 
                                                                batch_size=bs,
                                                                phase='train',
                                                                device=device,
-                                                               collate_fn=collate_fn,
+                                                               collate_fn=collate_fns,
                                                                descriptor=[total_descriptor, shared_descriptor],
-                                                               ensure_balance=args.ensure_domain_balance,)
+                                                               ensure_balance=args.ensure_domain_balance,
+                                                               apply_aug=[args.aug_source, args.aug_target],)
     # Create data loader for validation with full batch size.
     # create_data_objects returns Tuples
     # Use dataset descriptor from train_source_iter (which is the total dataset) for validation
     # Instead of directly using total_descriptor this ensures that even if descriptor is constructed later it is correct
+    # Do not apply mixup/cutmix to validation
     val_loader : DataLoader = create_data_objects(args=args, 
                                                   batch_size=args.batch_size,
                                                   phase='val',
                                                   device=device,
-                                                  collate_fn=collate_fn,
                                                   descriptor=train_source_iter.dataset_descriptor,
                                                   include_source_val_test=args.include_source_eval,
                                                   )[0]
@@ -149,6 +169,7 @@ def main(args):
                         num_classes=num_classes,
                         num_inputs=num_inputs,
                         args=args,
+                        hierarchy_level_names=total_descriptor.hierarchy_level_names,
                         **args.model_kwargs,
                         **args.classifier_kwargs)
     
@@ -183,7 +204,7 @@ def main(args):
                       logger=logger,
                       eval_classes=eval_classes,
                       grad_accum_steps=args.grad_accum_steps,
-                      mixup_fn=mixup_fn,
+                      mixup_fn=mixup_fns,
                       loss_scaler=loss_scaler,
                       amp_autocast=amp_autocast,
                       iter_names=None,
@@ -198,101 +219,90 @@ def main(args):
     optim.train()
     print(f"Training finished in {time.time() - start_time} seconds")
     print("Starting test evaluation")
-    # Evaluate on test set
+    evalNovDesc = args.eval_desc_novel
+    evalSharedDesc = args.eval_desc_shared
+    if evalNovDesc is None:
+        print("No novel descriptor provided. Using eval classes from novel descriptor of training.")
+        eval_class_groups = [eval_classes]
+    else:
+        eval_class_groups = [list(build_descriptor(fileRoot=args.root, fName=novDesc, ds_split=args.ds_split).targetIDs[-1]) for novDesc in evalNovDesc]
+    if evalSharedDesc is None:
+        print("No shared descriptor provided. Using eval classes from shared descriptor of training.")
+        eval_base_groups = [base_classes]
+    else:
+        eval_base_groups = [list(build_descriptor(fileRoot=args.root, fName=sharedDesc, ds_split=args.ds_split).targetIDs[-1]) for sharedDesc in evalSharedDesc]
+    
+    # If both are provided and have multiple values they must match
+    # If only one is provided and has multiple values the other is repeated or inferred
+    if len(eval_class_groups) > 1 and len(eval_base_groups) > 1:
+        assert len(eval_class_groups) == len(eval_base_groups), f"Number of novel and shared descriptors must match if both provide multiple. Got {len(eval_class_groups)} novel and {len(eval_base_groups)} shared descriptors."
+    elif len(eval_base_groups) > 1:
+        if args.eval_infer_other:
+            print("Inferring eval classes from shared and total classes.")
+            eval_class_groups = [[i for i in list(total_descriptor.targetIDs[-1]) if i not in classes] for classes in eval_base_groups]
+        else:
+            eval_class_groups = eval_class_groups*len(eval_base_groups)
+    elif len(eval_class_groups) > 1:
+        if args.eval_infer_other:
+            print("Inferring base classes from novel and total classes.")
+            eval_base_groups = [[i for i in list(total_descriptor.targetIDs[-1]) if i not in classes] for classes in eval_class_groups]
+        else:
+            eval_base_groups = eval_base_groups*len(eval_class_groups)
+    assert len(eval_class_groups) == len(eval_base_groups), f"Number of novel and shared descriptors must match. Got {len(eval_class_groups)} novel and {len(eval_base_groups)} shared descriptors."
+    
+    # Evaluate on test set with best model (needs to be loaded only once as it does not change during eval)
     load_checkpoint(model, checkpoint_path=logger.get_checkpoint_path('best'), strict=True)
-    # Create data loader for test with full batch size.
-    # Only create when needed to avoid keeping an unused data_loader permanent from the start
-    test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=False)[0]
-    runner = Validator(model=model, 
-                        device=device, 
-                        batch_size=args.batch_size, 
-                        eval_classes=eval_classes,
-                        additional_eval_group_classes=base_classes if args.eval_base else None,
-                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
-                        logger=logger,
-                        metrics=['acc@1', 'f1'] + args.metrics,
-                        dataloader=test_loader,
-                        send_to_device=args.no_prefetch,
-                        print_freq=args.print_freq,
-                        loss_scaler=loss_scaler,
-                        amp_autocast=amp_autocast,
-                        create_report=args.create_report,
-                        **args.confmat_kwargs)
-    runner.result_suffix = 'Target'
-    test_metrics = runner.run("Target")
-    csv_summary = filewriter.update_summary(epoch='Test Target', 
-                                            metrics=test_metrics, 
-                                            root=logger.out_dir,
-                                            write_header=True)
-    print("Test evaluation with source data")
-    test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=True)[0]
-    runner.dataloader = test_loader
-    runner.result_suffix = 'TargetSource'
-    test_metrics = runner.run("Target+Source")
-    csv_summary = filewriter.update_summary(epoch='Test Target+Source', 
-                                            metrics=test_metrics, 
-                                            root=logger.out_dir,
-                                            write_header=True)
-    # Default value from args is None (which is non Iterable)
-    add_test_desc = getattr(args, 'additional_test_desc', [])
-    add_test_desc = [] if add_test_desc is None else add_test_desc
-    for add_test_desc_name in add_test_desc:
-        print(f'Additional Test Evaluation using {add_test_desc_name}')
-        additional_test_desc = build_descriptor(fileRoot=args.root, fName=add_test_desc_name, ds_split=args.ds_split)
-        # eval_classes = [i for i in eval_classes if i in additional_test_desc.targetIDs[-1]]
-        eval_classes = list(additional_test_desc.targetIDs[-1])
-        test_loader = create_data_objects(args=args, 
-                                      batch_size=args.batch_size,
-                                      phase='test',
-                                      device=device,
-                                      collate_fn=collate_fn,
-                                      descriptor=train_source_iter.dataset_descriptor,
-                                      include_source_val_test=False)[0]
-        runner = Validator(model=model, 
-                        device=device, 
-                        batch_size=args.batch_size, 
-                        eval_classes=eval_classes,
-                        additional_eval_group_classes=base_classes if args.eval_base else None,
-                        eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
-                        logger=logger,
-                        metrics=['acc@1', 'f1'] + args.metrics,
-                        dataloader=test_loader,
-                        send_to_device=args.no_prefetch,
-                        print_freq=args.print_freq,
-                        loss_scaler=loss_scaler,
-                        amp_autocast=amp_autocast,
-                        create_report=args.create_report,
-                        **args.confmat_kwargs)
-        runner.result_suffix = f'Target_{add_test_desc_name}'
-        test_metrics = runner.run("Target")
-        csv_summary = filewriter.update_summary(epoch='Test Target', 
-                                                metrics=test_metrics, 
-                                                root=logger.out_dir,
-                                                write_header=True)
-        print("Test evaluation with source data")
+    for i, (eClasses,bClasses) in enumerate(zip(eval_class_groups, eval_base_groups)):
+        # Only print when there will be multiple eval groups otherwise might be confusing
+        if len(eval_class_groups) > 1:
+            print(f'Start test for eval groups {i}')
+            targetName = f'Target{i}'
+            targetSourceName = f'TargetSource{i}'
+        else:
+            targetName = 'Target'
+            targetSourceName = 'TargetSource'
+            
+        # Create data loader for test without source data
+        # Do not apply mixup/cutmix to test
         test_loader = create_data_objects(args=args, 
                                         batch_size=args.batch_size,
                                         phase='test',
                                         device=device,
-                                        collate_fn=collate_fn,
+                                        descriptor=train_source_iter.dataset_descriptor,
+                                        include_source_val_test=False)[0]
+        runner = Validator(model=model, 
+                            device=device, 
+                            batch_size=args.batch_size, 
+                            eval_classes=eClasses,
+                            additional_eval_group_classes=bClasses if args.eval_base else None,
+                            eval_groups_names=['novel', 'base'], # Names can be provided anytime as they are ignored if not needed
+                            logger=logger,
+                            metrics=['acc@1', 'f1'] + args.metrics,
+                            dataloader=test_loader,
+                            send_to_device=args.no_prefetch,
+                            print_freq=args.print_freq,
+                            loss_scaler=loss_scaler,
+                            amp_autocast=amp_autocast,
+                            create_report=args.create_report,
+                            **args.confmat_kwargs)
+        runner.result_suffix = targetName
+        test_metrics = runner.run(targetName)
+        csv_summary = filewriter.update_summary(epoch=f'Test {targetName}', 
+                                                metrics=test_metrics, 
+                                                root=logger.out_dir,
+                                                write_header=True)
+        print("Test evaluation with source data")
+        # Do not apply mixup/cutmix to test
+        test_loader = create_data_objects(args=args, 
+                                        batch_size=args.batch_size,
+                                        phase='test',
+                                        device=device,
                                         descriptor=train_source_iter.dataset_descriptor,
                                         include_source_val_test=True)[0]
         runner.dataloader = test_loader
-        runner.result_suffix = f'TargetSource_{add_test_desc_name}'
-        test_metrics = runner.run("Target+Source")
-        csv_summary = filewriter.update_summary(epoch='Test Target+Source', 
+        runner.result_suffix = targetSourceName
+        test_metrics = runner.run(targetSourceName)
+        csv_summary = filewriter.update_summary(epoch=f'Test {targetSourceName}', 
                                                 metrics=test_metrics, 
                                                 root=logger.out_dir,
                                                 write_header=True)
@@ -303,6 +313,12 @@ def main(args):
     f1 = runner.eval_f1
     print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}, F1 on Test: {f1:3.2f}")
     print(f'Total time: {time.time() - start_time}')
+    # Delete .latest checkpoint as it is not needed anymore
+    if os.path.exists(logger.get_checkpoint_path('latest')):
+        os.remove(logger.get_checkpoint_path('latest'))
+    if args.no_save:
+        if os.path.exists(logger.get_checkpoint_path('best')):
+            os.remove(logger.get_checkpoint_path('best'))
     handle_aws_postprocessing(args, s3_client=s3_client, ec2_client=ec2_client)
     logger.close()
         
@@ -337,9 +353,18 @@ if __name__ == '__main__':
     group = parser.add_argument_group('Dataloader')
     group.add_argument("--no-prefetch", action='store_true',
                        help="Do not use prefetcher for dataloading.")
+    group.add_argument("--identity-sampler", action='store_true',
+                       help='Just an identify sampler during training to ensure a '
+                       'certain number (4) of elements of the same class in each batch. '
+                       'Required/Suggested when using metric learning losses.')
+    
     
     # Data Transformations
     group = parser.add_argument_group('Data Transformations')
+    group.add_argument('--no-aug-source', action='store_true',
+                        help='Apply augmentation to source domain data.')
+    group.add_argument('--no-aug-target', action='store_true',
+                        help='Apply augmentation to target domain data.')
     group.add_argument('--train-resizing', type=str, default='default',
                         help='Resizing mode applied to train pipeline')
     group.add_argument('--val-resizing', type=str, default='default',
@@ -567,8 +592,17 @@ if __name__ == '__main__':
     group.add_argument("--include-source-eval", action='store_true',
                         help='Include source domain in evaluation (validation + test).')
     group.add_argument('--confmat-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
-    group.add_argument('--additional-test-desc', type=str, nargs='*',
-                       help='Additional descriptor files to evaluate in additional test runs.')
+    group.add_argument('--eval-desc-novel', type=str, nargs='*',
+                       help='Descriptor files for novel classes to evaluate test runs. '
+                       'If not specified uses novel descriptor from training. '
+                       'Must match number of --eval-desc-shared if both specify multiple values.')
+    group.add_argument('--eval-desc-shared', type=str, nargs='*',
+                       help='Descriptor files for shared/base classes to evaluate test runs. '
+                       'If not specified uses shared descriptor from training. '
+                       'Must match number of --eval-desc-novel if both specify multiple values.')
+    group.add_argument('--eval-infer-other', action='store_true',
+                       help='Infer shared/novel classes from novel/shared and total classes during evaluation. '
+                       'Only has an effect if multiple descriptor files are used.')
     group.add_argument('--no-base-eval', action='store_true',
                        help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
     
@@ -586,6 +620,8 @@ if __name__ == '__main__':
                         help='Save class summary tracking class wise metrics for each epoch.')
     group.add_argument("--create-report", action='store_true',
                         help='Save final report as a .html file.')
+    group.add_argument("--no-save", action='store_true',
+                        help='Do not save any checkpoints/Delete all checkpoints after finishing run.')
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
     if args_config.config:
