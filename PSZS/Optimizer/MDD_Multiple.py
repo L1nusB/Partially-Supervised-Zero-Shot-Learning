@@ -48,10 +48,14 @@ class MDD_Multiple(Base_Multiple):
         assert isinstance(self.model, METHOD_MODEL_MAP['mdd']), \
             f"MDD_Multiple model must be of type {METHOD_MODEL_MAP['mdd'].__name__}"
         self.model : MDD_Model
-        # Dynamically set the max_iters for the GRL based on epoch count
-        # can not be done during model construction as epochs and iters are not known
-        if grl_epochs is not None:
-            self.model.grl.max_iters = grl_epochs * iters_per_epoch
+        # Dynamically set the max_iters for the GRL based on epoch count if max_iters not given explicitly otherwise.
+        # If grl_epochs is not given it will default to half the number of epochs
+        # Can not be done during model construction as epochs and iters are not known
+        if self.model.grl_max_iters is None:
+            if grl_epochs is None:
+                grl_epochs = self.num_epochs // 2
+            self.model.grl.max_iters = grl_epochs * iters_per_epoch    
+        
         self.margin = margin
         self.mdd = ClassificationMarginDisparityDiscrepancy(margin).to(device)
         self.mdd.train() # Will always stay in train as irrelevant for validation
@@ -94,14 +98,10 @@ class MDD_Multiple(Base_Multiple):
     
     def _compute_loss_cls(self, 
                           pred: Tuple[TRAIN_PRED_TYPE, torch.Tensor], 
-                          target: Tuple[torch.Tensor], 
-                          features: Sequence[torch.Tensor],
-                          og_labels: Optional[Tuple[torch.Tensor]]=None) -> torch.Tensor:
+                          target: Tuple[torch.Tensor], ) -> torch.Tensor:
         # Pred contains the main predictions and the adversarial predictions
-        return super()._compute_loss(pred=pred[0],
-                                     target=target,
-                                     features=features,
-                                     og_labels=og_labels)
+        return super()._compute_loss_cls(pred=pred[0],
+                                         target=target,)
     
     def _get_train_results(self) -> OrderedDict:
         results = super()._get_train_results()

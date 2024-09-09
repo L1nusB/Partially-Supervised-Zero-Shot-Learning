@@ -46,9 +46,12 @@ class DANN_Multiple(Base_Multiple):
         assert isinstance(self.model, METHOD_MODEL_MAP['dann']), \
             f"DANN_Multiple model must be of type {METHOD_MODEL_MAP['dann'].__name__}"
         self.model : Domain_Adv_Model
-        # Dynamically set the max_iters for the GRL based on epoch count
-        # can not be done during model construction as epochs and iters are not known
-        if grl_epochs is not None:
+        # Dynamically set the max_iters for the GRL based on epoch count if max_iters not given explicitly otherwise.
+        # If grl_epochs is not given it will default to half the number of epochs
+        # Can not be done during model construction as epochs and iters are not known
+        if self.model.grl_max_iters is None:
+            if grl_epochs is None:
+                grl_epochs = self.num_epochs // 2
             self.model.domain_adversarial_loss.grl.max_iters = grl_epochs * iters_per_epoch
             
     def _expand_progress_bars(self, 

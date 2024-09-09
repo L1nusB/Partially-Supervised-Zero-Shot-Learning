@@ -24,6 +24,7 @@ class MCC_Multiple(Base_Multiple):
                  device: torch.device, 
                  domain_loss_weight: float = 1.0,
                  temperature: float = 2.5,
+                 source_mcc: bool = False,
                  **optim_kwargs,
                  ) -> None:    
         if temperature <= 0:
@@ -33,6 +34,7 @@ class MCC_Multiple(Base_Multiple):
         # Need to be set before super as super calls _expand_progress_bars
         self.domain_loss_weight = domain_loss_weight
         self.temperature = temperature
+        self.source_mcc = source_mcc
         super().__init__(
             train_iters=train_iters,
             val_loader=val_loader,
@@ -72,13 +74,16 @@ class MCC_Multiple(Base_Multiple):
         Returns:
             torch.Tensor: Domain adaptation loss scaled by `domain_loss_weight`.
         """
-        # Only the target domain prediction is needed
         # For hierarchical models, each pred has multiple components
         # Thus we need to get only the relevant component 
-        _, p_t = pred
+        p_s, p_t = pred
         if self.model.classifier.returns_multiple_outputs:
             p_t = p_t[self.model.classifier.test_head_pred_idx]
-        mcc_loss : torch.Tensor = self.mcc_loss(p_t)
+            p_s = p_s[self.model.classifier.test_head_pred_idx]
+        if self.source_mcc:
+            mcc_loss : torch.Tensor = self.mcc_loss(p_s) + self.mcc_loss(p_t)
+        else:
+            mcc_loss : torch.Tensor = self.mcc_loss(p_t)
         self.meter_mcc_loss.update(mcc_loss.item(), self.batch_size)
         return self.domain_loss_weight * mcc_loss
     

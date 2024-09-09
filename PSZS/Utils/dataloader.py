@@ -30,7 +30,7 @@ def build_dataloader(
         device: torch.device = torch.device('cuda'),
         use_prefetcher: bool = True,
         shuffle: Optional[bool] = None,
-        drop_last: bool = False,
+        drop_last: Optional[bool] = None,
         persistent_workers: bool = True,
         batch_sampler: Optional[Sampler | Iterable] = None,
 ):
@@ -85,6 +85,9 @@ def build_dataloader(
                 warnings.warn("Batch Sampler is given, drop_last will be set to False.")
             drop_last = False
         batch_size = 1 # Default value for batch_size in DataLoader class
+    else:
+        shuffle = shuffle if shuffle is not None else is_training
+        drop_last = drop_last if drop_last is not None else is_training
 
     loader_args = dict(
         batch_size=batch_size,

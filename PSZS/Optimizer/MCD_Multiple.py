@@ -164,10 +164,11 @@ class MCD_Multiple(Base_Multiple):
                            n=[self.batch_size] + [trg.size(0) for trg in target])
         return loss_1 + loss_2
     
-    def _compute_loss_features(self, features: Tuple[Sequence[torch.Tensor], Sequence[torch.Tensor]]) -> torch.Tensor:
+    def _compute_loss_features(self, features: Tuple[Sequence[torch.Tensor], Sequence[torch.Tensor]], 
+                               target: Tuple[torch.Tensor,torch.Tensor]) -> torch.Tensor:
         # Need to specify scope when using super in list comprehension
         # https://stackoverflow.com/questions/59520967/super-keyword-doesnt-work-properly-in-list-comprehension
-        return sum([super(MCD_Multiple, self)._compute_loss_features(f) for f in features])
+        return sum([super(MCD_Multiple, self)._compute_loss_features(f, target) for f in features])
     
     def _compute_loss_logits(self, pred: Tuple[TRAIN_PRED_TYPE, TRAIN_PRED_TYPE]) -> torch.Tensor:
         # Need to specify scope when using super in list comprehension

@@ -38,19 +38,25 @@ class BinomialLoss(nn.Module):
         num_neg_instances = n - num_instances
 
         pos_sim = pos_sim.reshape(len(pos_sim)//(num_instances-1), num_instances-1)
-        neg_sim = neg_sim.reshape(len(neg_sim) // num_neg_instances, num_neg_instances)
+        # This can fail during hierarchies as sampler only ensures fines level
+        # but all classes at that level could still belong to the same coarser level
+        # will lead to loss 0 anyways later
+        if num_neg_instances > 0:
+            neg_sim = neg_sim.reshape(len(neg_sim) // num_neg_instances, num_neg_instances)
+        else:
+            # If no negative instances, return 0 loss as loop will always just skip
+            return torch.tensor(0.0, device=inputs.device)
 
         #  clear way to compute the loss first
         loss = list()
         c = 0
 
+        # Guarantee that there is at least one negative pair (otherwise 0 would have been returned)
         for i, pos_pair_ in enumerate(pos_sim):
-            # print(i)
             pos_pair_ = torch.sort(pos_pair_)[0]
             neg_pair_ = torch.sort(neg_sim[i])[0]
 
             if self.hard_mining:
-                # print('mining')
                 pos_pair = torch.masked_select(pos_pair_, pos_pair_ < neg_pair_[-1] + 0.1)
                 neg_pair = torch.masked_select(neg_pair_, neg_pair_ > pos_pair_[0] - 0.1)  
             
@@ -63,16 +69,16 @@ class BinomialLoss(nn.Module):
                 neg_loss = 2.0/self.alpha * torch.mean(torch.log(1 + torch.exp(self.alpha*(neg_pair - 0.5))))
 
             else:  
-                # print('no mining')
                 pos_pair = pos_pair_
                 neg_pair = neg_pair_ 
 
+                if len(neg_pair) < 1 or len(pos_pair) < 1:
+                    c += 1
+                    continue
+                
                 pos_loss = torch.mean(torch.log(1 + torch.exp(-2*(pos_pair - self.margin))))
                 neg_loss = torch.mean(torch.log(1 + torch.exp(self.alpha*(neg_pair - self.margin))))
 
-            if len(neg_pair) == 0:
-                c += 1
-                continue
 
             loss.append(pos_loss + neg_loss)
             

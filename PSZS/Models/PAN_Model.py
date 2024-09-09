@@ -60,9 +60,11 @@ class PAN_Model(CustomModel):
         """
         self.hidden_size = hidden_size
         if isinstance(hierarchy_accum_func, str) == False and hierarchy_accum_func.startswith('coarse') == False:
-            warnings.warn(f"You are using PAN with hierarchy accumulation ({hierarchy_accum_func}) "
-                          "which will cause duplicate loss for fine classes. Consider using one of the "
-                          "'coarse' as hierarchy accumulation functions.")
+            print(f"You are using PAN with hierarchy accumulation ({hierarchy_accum_func}) "
+                    "which might cause duplicate loss for fine classes.")
+            # warnings.warn(f"You are using PAN with hierarchy accumulation ({hierarchy_accum_func}) "
+            #               "which might cause duplicate loss for fine classes. Consider using one of the "
+            #               "'coarse' as hierarchy accumulation functions or make sure weights are set appropriately.")
         super().__init__(backbone=backbone, 
                          num_classes=num_classes,
                          num_inputs=num_inputs, 
@@ -76,7 +78,8 @@ class PAN_Model(CustomModel):
         if self.head_type.returns_multiple_outputs==False or self.head_type.num_head_pred==1:
             raise TypeError("PAN requires a classifier that returns multiple outputs.")
             print("Dataset has multiple classes but the classification head only returns one output.")
-        self.num_hierarchy_levels = self.num_classes.shape[1]
+        # self.num_hierarchy_levels = self.num_classes.shape[1]
+        self.num_hierarchy_levels = self.num_pred
         self.num_coarse_levels = self.num_hierarchy_levels - 1
         self.num_fine_classes = self.classifier.largest_num_classes_test_lvl
         self.num_shared_classes = self.classifier.smallest_num_classes_test_lvl
@@ -95,7 +98,8 @@ class PAN_Model(CustomModel):
                                                                  in_feature2=num_shared_classes,
                                                                  hidden_size=self.hidden_size)
         # Do no construct a GRL layers as we just use default params for the GRL
-        self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator=bilin_domain_discriminator)
+        self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator,
+                                                                           mode='simple')
     
     def smooth_labels(self, 
                      fine_target_one_hot: torch.Tensor, 
@@ -109,7 +113,8 @@ class PAN_Model(CustomModel):
         coarse_weight = self.smooth_initial_coarse + (self.smooth_final_coarse - self.smooth_initial_coarse) * smooth_progress
         detached_logits = [logits.detach() for logits in coarse_logits] # Remove from computation graph
         coarse_prediction_mix = torch.zeros(fine_target_one_hot.shape, 
-                                            device=coarse_logits[0].device, dtype=coarse_logits[0].dtype)
+                                            device=coarse_logits[0].device, 
+                                            dtype=coarse_logits[0].dtype)
         assert len(coarse_logits) == self.num_coarse_levels, f"Number of coarse levels must match the number of coarse logits {len(coarse_logits)} != {self.num_coarse_levels}"
         for lvl in range(self.num_coarse_levels):
             # Only iterate over the fine classes that exist (for shared domain this is only a subset)
@@ -124,12 +129,15 @@ class PAN_Model(CustomModel):
         val_test_state_dict.update({f'bilin_domain_adversarial_loss.{k}':v for k,v in self.bilin_domain_adversarial_loss.state_dict().items()})
         return val_test_state_dict
     
-    # Check whether to use higher learning rate for domain discriminator
+    # Check whether to use higher learning rate for domain discriminator?
     def model_or_params(self) -> Dict[str, Any]:
         params = [{"params": self.backbone.parameters(), 'weight_decay':0},
                   {"params": self.bottleneck.parameters()},
-                  {"params": self.classifier.parameters()}]
-        params.append({'params': self.bilin_domain_adversarial_loss.bilin_domain_discriminator.parameters(), 'lr': 1.})
+                  {"params": self.classifier.parameters()},
+                  {'params': self.bilin_domain_adversarial_loss.bilin_domain_discriminator_s.parameters()}]
+        if self.bilin_domain_adversarial_loss.bilin_domain_discriminator_o is not None:
+            params.append({'params': self.bilin_domain_adversarial_loss.bilin_domain_discriminator_o.parameters()})
+        # params.append({'params': self.bilin_domain_adversarial_loss.bilin_domain_discriminator.parameters(), 'lr': 1.})
         return params
         
     def get_model_kwargs(**kwargs) -> dict:

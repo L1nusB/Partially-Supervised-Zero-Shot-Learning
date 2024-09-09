@@ -18,13 +18,14 @@ from PSZS.datasets.datasets import get_dataset_names
 from PSZS.Optimizer import get_optim
 from PSZS.Utils.data import create_data_objects
 from PSZS.Utils.io import filewriter
+import PSZS.Utils.utils as utils
+from PSZS.Utils.sampler import AVAI_SAMPLERS
 from PSZS.Models import *
 from PSZS.Validator.Validator import Validator
 from PSZS.datasets import build_remapped_descriptors, build_descriptor
-import PSZS.Utils.utils as utils
 from PSZS.AWS import setup_aws, handle_aws_postprocessing
 
-HIERARCHICAL_HEAD = ['HierarchicalHead']
+HIERARCHICAL_HEAD = ['HierarchicalHead','CoupledHead']
 
 def main(args):
     setup_success, ec2_client, s3_client = setup_aws(args)
@@ -316,6 +317,31 @@ def main(args):
     # Delete .latest checkpoint as it is not needed anymore
     if os.path.exists(logger.get_checkpoint_path('latest')):
         os.remove(logger.get_checkpoint_path('latest'))
+    
+    if getattr(args, "no_additional_metrics", False) == False:
+        print("Creation of tSNE and A-Distance")
+        load_checkpoint(model, checkpoint_path=logger.get_checkpoint_path('best'), strict=True)
+        test_loader = create_data_objects(args=args, 
+                                            batch_size=args.batch_size,
+                                            phase='test',
+                                            device=device,
+                                            descriptor=train_source_iter.dataset_descriptor,
+                                            include_source_val_test=False)[0]
+        test_loader_source = create_data_objects(args=args, 
+                                            batch_size=args.batch_size,
+                                            phase='custom_test',
+                                            device=device,
+                                            descriptor=train_source_iter.dataset_descriptor,
+                                            task_key='wTot',
+                                            include_source_val_test=False)
+
+        utils.tSNE_A_distance(source_loader=test_loader_source,
+                              target_loader=test_loader,
+                              model=model.backbone,
+                              device=device,
+                              eval_classes=eval_classes,
+                              out_dir=logger.out_dir,)
+    
     if args.no_save:
         if os.path.exists(logger.get_checkpoint_path('best')):
             os.remove(logger.get_checkpoint_path('best'))
@@ -353,18 +379,26 @@ if __name__ == '__main__':
     group = parser.add_argument_group('Dataloader')
     group.add_argument("--no-prefetch", action='store_true',
                        help="Do not use prefetcher for dataloading.")
-    group.add_argument("--identity-sampler", action='store_true',
-                       help='Just an identify sampler during training to ensure a '
-                       'certain number (4) of elements of the same class in each batch. '
-                       'Required/Suggested when using metric learning losses.')
+    group.add_argument("--sampler", type=str,
+                       help=f"Sampler used for training. Available: {','.join(AVAI_SAMPLERS)}")
+    group.add_argument("--sampler-num-instances", type=int, default=4,
+                       help="Number of instances to sample for each label. Default: 4")
+    group.add_argument("--sampler-num-labels", type=int,
+                       help="Number of labels to sample for each batch. "
+                       "Resolves based on batch size and --sampler-num-instances if not specified. "
+                       "Default: None")
+    group.add_argument("--sampler-num-fixed-labels", type=int,
+                       help="Number of fixed labels to sample for each batch. "
+                       "Only relevant if a FixedSampler is used. Default: None")
+    group.add_argument('--sampler-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
     
     
     # Data Transformations
     group = parser.add_argument_group('Data Transformations')
     group.add_argument('--no-aug-source', action='store_true',
-                        help='Apply augmentation to source domain data.')
+                        help='Do not apply augmentation to source domain data.')
     group.add_argument('--no-aug-target', action='store_true',
-                        help='Apply augmentation to target domain data.')
+                        help='Do not apply augmentation to target domain data.')
     group.add_argument('--train-resizing', type=str, default='default',
                         help='Resizing mode applied to train pipeline')
     group.add_argument('--val-resizing', type=str, default='default',
@@ -605,6 +639,8 @@ if __name__ == '__main__':
                        'Only has an effect if multiple descriptor files are used.')
     group.add_argument('--no-base-eval', action='store_true',
                        help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
+    group.add_argument('--no-additional-metrics', action='store_true',
+                       help="DO not create t-SNE and A-Distance at the end.")
     
     # Logging and checkpoints
     group = parser.add_argument_group('Logging and Checkpoints')

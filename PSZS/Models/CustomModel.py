@@ -1,6 +1,7 @@
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Self, TypeAlias
 import warnings
+from types import FunctionType
 
 import torch
 import torch.nn as nn
@@ -83,6 +84,7 @@ class CustomModel(nn.Module):
                  sched_kwargs: Dict[str, Any],
                  head_type: str = "SimpleHead",
                  cls_loss: str = "ce",
+                 cls_loss_accum: str | Callable[[Sequence[torch.Tensor]], torch.Tensor] = "sum",
                  bottleneck_dim: Optional[int] = None,
                  hierarchy_accum_func: Callable[[Sequence[torch.Tensor]], torch.Tensor] | str = "sum",
                  feature_loss_func: Optional[Callable[[Sequence[torch.Tensor]], Sequence[torch.Tensor]] | str] = None,
@@ -90,7 +92,7 @@ class CustomModel(nn.Module):
                  logit_loss_func: Optional[Callable[[TRAIN_PRED_TYPE], torch.Tensor] | str] = None,
                  logit_accum_func: Optional[Callable[[Sequence[torch.Tensor]], torch.Tensor] | str] = None,
                  additional_params: Dict[str, Any] = {},
-                 **classifier_kwargs) -> None:
+                 **kwargs) -> None:
         """
         Args:
             backbone (torch.nn.Module): 
@@ -134,7 +136,7 @@ class CustomModel(nn.Module):
             additional_params (dict): 
                 Additional Parameters any additional loss functions that require additional parameters
                 as well as parameters for hierarchy mixing.
-            classifier_kwargs (dict): 
+            kwargs (dict): 
                 Keyword arguments for the classifier and head
                 - num_features (Optional[int]): Number of features before the head layer
                 - auto_split (bool): Whether to automatically split the features into len(num_classes). 
@@ -179,12 +181,13 @@ class CustomModel(nn.Module):
                                                num_classes=self.num_classes,
                                                num_inputs=self.num_inputs,
                                                in_features=self.feature_dim, 
-                                               **classifier_kwargs)
+                                               **kwargs)
         
         self.hierarchy_accum_func = hierarchy_accum_func
         self.feature_loss_func = feature_loss_func
         self.feature_accum_func = feature_accum_func
         self.feature_softmax = False
+        self.feature_labels = False
         self.logit_loss_func = logit_loss_func
         self.logit_accum_func = logit_accum_func
         self.logit_softmax = False
@@ -193,13 +196,14 @@ class CustomModel(nn.Module):
         self.default_feature_loss_weight = 0
         self.default_logit_loss_weight = 0
         
-        self._resolve_loss(cls_loss, **classifier_kwargs)
-        self.cls_loss_accum_func = sum
+        self._resolve_loss(cls_loss, **kwargs)
+        self._resolve_cls_loss_accum(cls_loss_accum, **kwargs)
+        # self.cls_loss_accum_func = sum
         
         # Register DA components and other Parameters to be included in optimizers and schedulers
-        self._register_da_components(**classifier_kwargs)
+        self._register_da_components(**kwargs)
         self._register_hierarchy_accum()
-        self._register_feature_loss_func()
+        self._register_feature_loss_func(**kwargs)
         self._register_feature_loss_accum()
         self._register_logit_loss_func()
         self._register_logit_loss_accum()
@@ -248,41 +252,53 @@ class CustomModel(nn.Module):
         weights = self.initial_weights + (self.final_weights - self.initial_weights) * mix_progress
         return weights
     
+    @property
+    def metric_cls_loss(self) -> bool:
+        """Returns whether the classification loss is a metric loss or not.
+        A metric is loss is given when the loss is not CrossEntropyLoss or cross_entropy."""
+        # When using the functional API the loss is a function variable and thus 
+        # its name is not a class variable
+        # https://stackoverflow.com/questions/624926/how-do-i-detect-whether-a-variable-is-a-function
+        # Alternative check checks the class name to be a function which also holds for functional API
+        if isinstance(self.cls_loss_func, FunctionType) or self.cls_loss_func.__class__.__name__ == 'function':
+            loss_name = self.cls_loss_func.__name__
+        else:    
+            loss_name = self.cls_loss_func.__class__.__name__
+        return not(loss_name == 'CrossEntropyLoss' or loss_name == 'cross_entropy')
+    
     def _resolve_loss(self, loss: str = 'ce', **kwargs) -> None:
         print(f"Resolving loss {loss}.")
-        match loss:
-            case 'ce':
-                self.cls_loss_func = F.cross_entropy
-            case 'binom':
-                loss_type = losses.BinomialLoss
-                loss_kwargs = loss_type.resolve_params(**kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case 'contrastive':
-                loss_type = losses.ContrastiveLoss
-                loss_kwargs = loss_type.resolve_params(**kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case 'lifted':
-                loss_type = losses.LiftedStructureLoss
-                loss_kwargs = loss_type.resolve_params(**kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case 'margin':
-                loss_type = losses.MarginLoss
-                loss_kwargs = loss_type.resolve_params(nClasses=self.classifier.largest_num_classes_test_lvl, 
-                                                       **kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case 'ms':
-                loss_type = losses.MultiSimilarityLoss
-                loss_kwargs = loss_type.resolve_params(**kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case 'triplet':
-                loss_type = losses.HardMineTripletLoss
-                loss_kwargs = loss_type.resolve_params(**kwargs)
-                self.cls_loss_func = loss_type(**loss_kwargs)
-            case _:
-                warnings.warn(f"Loss {loss} not recognized. Using default Cross-Entropy loss. "
+        if loss == 'ce':
+            self.cls_loss_func = F.cross_entropy
+            # Functional API does not use __class__ intermediate
+            loss_name = self.cls_loss_func.__name__
+        elif loss in losses.AVAIL_METRIC_LOSS:
+            self.cls_loss_func = losses.resolve_metric_loss(loss, **kwargs)
+            loss_name = self.cls_loss_func.__class__.__name__
+        else:
+            warnings.warn(f"Loss {loss} not recognized. Using default Cross-Entropy loss. "
                               f"Available losses: {losses.get_losses_names()}")
-                self.cls_loss_func = F.cross_entropy
-        print(f"Using loss function {self.cls_loss_func.__class__.__name__}.")
+            # Functional API does not use __class__ intermediate
+            self.cls_loss_func = F.cross_entropy
+            loss_name = self.cls_loss_func.__name__
+        print(f"Using loss function {loss_name}.")
+        
+    def _resolve_cls_loss_accum(self, cls_loss_accum: str | Callable = "sum", **kwargs) -> None:
+        if isinstance(cls_loss_accum, str):
+            match cls_loss_accum.lower():
+                case "sum":
+                    self.cls_loss_accum_func = sum
+                case "avg" | "mean":
+                    self.cls_loss_accum_func = torch.mean
+                case "source":
+                    self.cls_loss_accum_func = partial(indexed_accum, 0)
+                case "target":
+                    self.cls_loss_accum_func = partial(indexed_accum, 1)
+                case _:
+                    print(f"Loss accumulation method {cls_loss_accum} not recognized. Using default sum.")
+                    self.cls_loss_accum_func = sum
+        else:
+            self.cls_loss_accum_func = cls_loss_accum
         
     def _register_hierarchy_accum(self) -> None:
         """Sets values of `hierarchy_accum_func` and `hierarchy_weights` based on the current `hierarchy_accum_func`.
@@ -292,11 +308,13 @@ class CustomModel(nn.Module):
         # If a string is given, resolve the function otherwise use the given function
         # already in self.hierarchy_accum_func
         if isinstance(self.hierarchy_accum_func, str):
-            match self.hierarchy_accum_func:
+            match self.hierarchy_accum_func.lower():
                 case "sum":
                     self.hierarchy_accum_func = sum_accum
                 case "avg" | "mean":
                     self.hierarchy_accum_func = avg_accum
+                case "type":
+                    self.hierarchy_accum_func = partial(indexed_accum, -3)
                 case "make":
                     self.hierarchy_accum_func = partial(indexed_accum, -2)
                 case "model":
@@ -362,6 +380,8 @@ class CustomModel(nn.Module):
                         self.hierarchy_accum_func = partial(dynamic_weighted_accum, weight_func=self.mixing_weight)
                     else:
                         raise ValueError(f"Invalid hierarchy-accum {self.hierarchy_accum_func}. Valid values are: sum, avg, make, model, weighted, dynamic")
+        else:
+            self.hierarchy_accum_func = self.hierarchy_accum_func
     
     def _auto_resolve_accum(self, 
                             loss_specifier: str, 
@@ -375,6 +395,9 @@ class CustomModel(nn.Module):
         If the loss_specified is not found in `DEFAULT_ACCUM` use `sum_accum` as default.
         If batch_accum is True and the loss_specifier is not found in `DEFAULT_BATCH_ACCUM`,
         `batch_accum_func` is not modified."""
+        # Metric losses do not perform accumulation
+        if loss_specifier.__class__.__name__ in losses.AVAIL_METRIC_LOSS:
+            return
         # Only set the accum function if it is not already set
         if getattr(self, accum_specifier) is None:
             accum_func = DEFAULT_ACCUM.get(loss_specifier, sum_accum)
@@ -390,9 +413,13 @@ class CustomModel(nn.Module):
             defaults = DEFAULT_FEATURE_WEIGHTS_AVG if (self.feature_accum_func == 'avg' or self.feature_accum_func == 'mean') else DEFAULT_FEATURE_WEIGHTS_SUM
             self.default_feature_loss_weight = defaults.get(loss_specifier, 1e-3)
         elif self.feature_accum_func is None:
-            accum_type = DEFAULT_ACCUM_SPECIFIED.get(loss_specifier, "sum")
-            defaults = DEFAULT_FEATURE_WEIGHTS_AVG if (accum_type == 'avg') else DEFAULT_FEATURE_WEIGHTS_SUM
-            self.default_feature_loss_weight = defaults.get(loss_specifier, 1e-3)
+            # Metric losses have a default weight of 1
+            if self.feature_loss_func.__class__.__name__ in losses.AVAIL_METRIC_LOSS:
+                self.default_feature_loss_weight = 1
+            else:
+                accum_type = DEFAULT_ACCUM_SPECIFIED.get(loss_specifier, "sum")
+                defaults = DEFAULT_FEATURE_WEIGHTS_AVG if (accum_type == 'avg') else DEFAULT_FEATURE_WEIGHTS_SUM
+                self.default_feature_loss_weight = defaults.get(loss_specifier, 1e-3)
         else:
             self.default_feature_loss_weight = 1e-3
     
@@ -407,63 +434,64 @@ class CustomModel(nn.Module):
         else:
             self.default_logit_loss_weight = 0.05
             
-    def _register_feature_loss_func(self) -> None:
+    def _register_feature_loss_func(self, **kwargs) -> None:
         """Sets value of `feature_loss_func` based on the current `feature_loss_func`.
         If a string is given, the corresponding function is resolved otherwise the passed Callable is used.
         Valid string values for `feature_loss_func` are: `none`, `accum`, `entropy`, `bsp`, `afn`.
         When resolving the function, the `logit_accum_func` is set based on `_auto_resolve_accum` with `batch_accum=True`.
         If `None` is given, the `feature_accum_func` is set to `None` as well.
-        If `entropy` is specified `eps` is retrieved from `additional_params` or set to default value.
-        If `afn` is specified `radius` is retrieved from `additional_params` or set to default value.
+        If `entropy` is specified `eps` is retrieved from `kwargs` or set to default value.
+        If `afn` is specified `radius` is retrieved from `kwargs` or set to default value.
         """
         if self.feature_loss_func is None:
             # Also set feature_accum_func to None
             self.feature_accum_func = None
         # If a string is given, resolve the function otherwise use the given function
         elif isinstance(self.feature_loss_func, str):
-            match self.feature_loss_func.lower():
+            self.feature_loss_func = self.feature_loss_func.lower()
+            match self.feature_loss_func:
                 case 'none':
                     self.feature_loss_func = None
                     # Also set feature_accum_func to None
                     self.feature_accum_func = None
+                    batch_accum=True
                 case 'accum':
                     self.feature_loss_func = nothing
-                    self._set_default_weight_features(loss_specifier='accum')
-                    self._auto_resolve_accum(loss_specifier='accum', 
-                                             accum_specifier='feature_accum_func',
-                                             batch_accum=True)
+                    batch_accum=True
                 case 'entropy':
-                    if self.additional_params.get('eps', None) is None:
+                    if kwargs.get('eps', None) is None:
                         # Use default eps value
                         self.feature_loss_func = entropy_multiple
                     else:
-                        self.feature_loss_func = partial(entropy_multiple, eps=self.additional_params['eps'])
-                    self._set_default_weight_features(loss_specifier='entropy')
-                    self._auto_resolve_accum(loss_specifier='entropy', 
-                                             accum_specifier='feature_accum_func',
-                                             batch_accum=True)
+                        self.feature_loss_func = partial(entropy_multiple, eps=kwargs['eps'])
+                    batch_accum=True
                     self.feature_softmax = True
                 case 'bsp':
                     self.feature_loss_func = bsp
-                    self._set_default_weight_features(loss_specifier='bsp')
                     # For bsp no batch accumulation is required as reduction already only return single values
-                    self._auto_resolve_accum(loss_specifier='bsp', 
-                                             accum_specifier='feature_accum_func',
-                                             batch_accum=False)
+                    batch_accum=False
                 case 'afn':
-                    if self.additional_params.get('radius', None) is None:
+                    if kwargs.get('radius', None) is None:
                         # Use default radius value
                         self.feature_loss_func = afn
                     else:
-                        self.feature_loss_func = partial(afn, radius=self.additional_params['radius'])
-                    self._set_default_weight_features(loss_specifier='afn')
+                        self.feature_loss_func = partial(afn, radius=kwargs['radius'])
                     # For afn no batch accumulation is required as reduction already only return single values
-                    self._auto_resolve_accum(loss_specifier='afn', 
-                                             accum_specifier='feature_accum_func',
-                                             batch_accum=False)
+                    batch_accum=False
                 case _:
-                    raise ValueError(f"Feature function {self.feature_loss_func} not recognized. "
-                                    "Available values: 'none', 'accum', 'entropy', 'bsp', 'afn'")
+                    if self.feature_loss_func in losses.AVAIL_METRIC_LOSS:
+                        self.feature_loss_func = losses.resolve_metric_loss(self.feature_loss_func, **kwargs)
+                        self.feature_accum_func = None
+                        batch_accum=False
+                        self.feature_labels = True
+                    else:
+                        raise ValueError(f"Feature function {self.feature_loss_func} not recognized. "
+                                        "Available values: 'none', 'accum', 'entropy', 'bsp', 'afn', "
+                                        f"{','.join(losses.AVAIL_METRIC_LOSS)}")
+            self._set_default_weight_features(loss_specifier=self.feature_loss_func)
+            self._auto_resolve_accum(loss_specifier=self.feature_loss_func, 
+                                     accum_specifier='feature_accum_func',
+                                     batch_accum=batch_accum)
     
     def _register_feature_loss_accum(self) -> None:
         """Set value of `feature_accum_func` based on the current `feature_accum_func`.
@@ -606,14 +634,26 @@ class CustomModel(nn.Module):
             predictions = self.classifier.forward_test(f)
             return predictions
         
-    def compute_feature_loss(self, features: Sequence[torch.Tensor]) -> torch.Tensor:
+    def compute_feature_loss(self, features: Sequence[torch.Tensor], target: LABEL_TYPE) -> torch.Tensor:
         if self.feature_softmax:
             features = [f.softmax(dim=1) for f in features]
-        return self.feature_accum_func(self.feature_loss_func(features))
+        if self.feature_accum_func is None:
+            if self.feature_labels:
+                return self.feature_loss_func(torch.cat(features, dim=0), torch.cat(target, dim=0))
+            else:
+                return self.feature_loss_func(torch.cat(features, dim=0))
+        else:
+            if self.feature_labels:
+                return self.feature_accum_func(self.feature_loss_func(features, target))
+            else:
+                return self.feature_accum_func(self.feature_loss_func(features))
     
     def compute_logit_loss(self, logits: Sequence[torch.Tensor]) -> torch.Tensor:
         if self.logit_softmax:
-            logits = [l.softmax(dim=1) for l in logits]
+            if self.classifier.returns_multiple_outputs:
+                logits = [l[self.classifier.test_head_pred_idx].softmax(dim=1) for l in logits]
+            else:
+                logits = [l.softmax(dim=1) for l in logits]
         return self.logit_accum_func(self.logit_loss_func(logits))
     
     def compute_cls_loss(self, 
@@ -718,10 +758,10 @@ class CustomModel(nn.Module):
         if 'logit_accum_func' in kwargs:
             params['logit_accum_func'] = kwargs.get('logit_accum_func')
             kwargs.pop('logit_accum_func')
-        if 'eps' in kwargs:
-            params['additional_params']['eps'] = kwargs['eps']
-            kwargs.pop('eps')
-        if 'radius' in kwargs:
-            params['additional_params']['radius'] = kwargs['radius']
-            kwargs.pop('radius')
+        # if 'eps' in kwargs:
+        #     params['additional_params']['eps'] = kwargs['eps']
+        #     kwargs.pop('eps')
+        # if 'radius' in kwargs:
+        #     params['additional_params']['radius'] = kwargs['radius']
+        #     kwargs.pop('radius')
         return params, kwargs

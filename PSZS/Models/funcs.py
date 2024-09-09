@@ -200,13 +200,13 @@ def mixing_progress(strategy: str, step: int, max_step: int) -> float:
     """Computes the mixing progress of the given strategy at the current step.
     
     Strategies are:
-        - curriculum: Proposed curriculum schedule of PAN paper
-        - step: linear steps
-        - exponential: sigmoidal curve
-        - fixed: always returns 1
-        - linear: linear interpolation
-        - sigmoid: sigmoid function (not tested)
-        - cosine: cosine function (not tested)
+    - curriculum: Proposed curriculum schedule of PAN paper
+    - step: linear steps
+    - exponential: sigmoidal curve
+    - fixed: always returns 1
+    - linear: linear interpolation
+    - sigmoid: sigmoid function (not tested)
+    - cosine: cosine function (not tested)
         
     Returns:
         float: The mixing progress at the current step.

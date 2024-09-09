@@ -27,7 +27,8 @@ class LiftedStructureLoss(nn.Module):
         dist_mat = (mag + mag.transpose(0, 1) - 2 * sim_mat)
         dist_mat = F.relu(dist_mat).sqrt().to(inputs.device)
         # split the positive and negative pairs
-        eyes_ = torch.tensor(torch.eye(n, n), device=targets.device)
+        # eyes_ = torch.eye(n, n, device=targets.device)
+        eyes_ = torch.eye(n, n, device=targets.device)
         zeros_ = torch.zeros(n,n, device=targets.device)
         # eyes_ = Variable(torch.eye(n, n))
         pos_mask = targets.expand(n, n).eq(targets.expand(n, n).t())

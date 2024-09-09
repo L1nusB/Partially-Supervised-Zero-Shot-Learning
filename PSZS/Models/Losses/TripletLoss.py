@@ -53,6 +53,9 @@ class HardMineTripletLoss(nn.Module):
 
         # For each anchor, find the hardest positive and negative
         mask = targets.expand(n, n).eq(targets.expand(n, n).t())
+        # No negative sample (relevant for hierarchical uses)
+        if mask.all():
+            return torch.tensor(0.0, requires_grad=True)
         dist_ap, dist_an = [], []
         for i in range(n):
             dist_ap.append(dist[i][mask[i]].max().unsqueeze(0))

@@ -1,10 +1,6 @@
 import torch
 from torch import nn
 
-def test():
-    """Random"""
-    pass
-
 class ContrastiveLoss(nn.Module):
     """
     Reference: 
@@ -40,20 +36,25 @@ class ContrastiveLoss(nn.Module):
         num_neg_instances = n - num_instances
         
         pos_sim = pos_sim.reshape(len(pos_sim)//(num_instances-1), num_instances-1)
-        neg_sim = neg_sim.reshape(len(neg_sim) // num_neg_instances, num_neg_instances)
+        # This can fail during hierarchies as sampler only ensures fines level
+        # but all classes at that level could still belong to the same coarser level
+        # will lead to loss 0 anyways later
+        if num_neg_instances > 0:
+            neg_sim = neg_sim.reshape(len(neg_sim) // num_neg_instances, num_neg_instances)
 
         loss = list()
         for i, pos_pair_ in enumerate(pos_sim):
-            # print(i)
             pos_pair = pos_pair_
-            neg_pair_ = torch.sort(neg_sim[i])[0]
+            if num_neg_instances > 0:
+                neg_pair_ = torch.sort(neg_sim[i])[0]
 
-            neg_pair = torch.masked_select(neg_pair_, neg_pair_ > self.margin)
+                neg_pair = torch.masked_select(neg_pair_, neg_pair_ > self.margin)
+            else:
+                neg_pair = []
             # pos_pair = torch.masked_select(pos_pair_, pos_pair_ < neg_pair_[-1] + 0.05)
             
             neg_loss = 0
             if self.mean == False:
-                # print('sum is ok')
                 pos_loss = torch.sum(-pos_pair+1) 
                 if len(neg_pair) > 0:
                     neg_loss = torch.sum(neg_pair)

@@ -127,6 +127,10 @@ class Base_Optimizer():
         # Set eval_metrics (to lower to avoid case sensitivity)
         self.eval_metrics = [metric.lower() for metric in eval_metrics] if eval_metrics else []
         
+        # if not self._validate_data_sampler():
+        #     raise ValueError("A sampler from PSZS.Utils.sampler must be used for the "
+        #                      "train iterators when a metric loss is used.")
+        
         self._construct_default_meters()
         self.last_time_mark = time.time()
         self.progress_bar_train, self.progress_bar_val = self._build_progress_bars()
@@ -276,6 +280,19 @@ class Base_Optimizer():
             return self.mixup_fns is not None
         else:
             return False
+        
+    def _validate_data_sampler(self) -> bool:
+        """Check if a data sampler is used for the train iterators.
+        This is required if the model uses a metric loss function (no CE loss).
+        Valid samplers must be modules of `PSZS.Utils.sampler`.
+        """
+        if self.model.metric_cls_loss:
+            if isinstance(self.train_iters, ForeverDataIterator):
+                return self.train_iters.data_loader.batch_sampler.__module__ == 'PSZS.Utils.sampler'
+            else:
+                return all([it.data_loader.batch_sampler.__module__ == 'PSZS.Utils.sampler' for it in self.train_iters])
+        else:
+            return True
     
     def _get_train_batch_sizes(self) -> int | List[int]:
         if isinstance(self.train_iters, ForeverDataIterator):
@@ -467,7 +484,7 @@ class Base_Optimizer():
         adaptation_loss = self._compute_loss_adaptation(pred=pred, target=target, 
                                                         features=features, og_labels=og_labels)
         # Only returns non zero if feature loss is used
-        feature_loss = self._compute_loss_features(features=features)
+        feature_loss = self._compute_loss_features(features=features, target=target)
         # Only returns non zero if logit loss is used
         logit_loss = self._compute_loss_logits(pred=pred)
         
@@ -500,13 +517,14 @@ class Base_Optimizer():
             non zero loss is returned."""
         return torch.tensor(0)
     
-    def _compute_loss_features(self, features: Sequence[FEATURE_TYPE]) -> torch.Tensor:
+    def _compute_loss_features(self, features: Sequence[FEATURE_TYPE], target: LABEL_TYPE) -> torch.Tensor:
         """Compute an optional additional feature loss for the model.
         The returned loss should be a scalar and be scaled with the corresponding hyperparamteres as it gets 
         added to the classification loss as is.
         If no feature loss is used or `feature_loss_weight` is 0 this function should just return 0."""
         if self.has_feature_loss:
-            feature_loss = self.feature_loss_weight * self.model.compute_feature_loss(features=features)
+            feature_loss = self.feature_loss_weight * self.model.compute_feature_loss(features=features,
+                                                                                      target=target)
             # In case adaptation mode filters the filters only account for actual features
             f_count = sum([f_i.size(0) for f_i in features])
             self.meter_feature_loss.update(feature_loss.item(), f_count)

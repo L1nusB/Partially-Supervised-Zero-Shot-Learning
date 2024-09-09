@@ -104,6 +104,17 @@ def _get_optim_multiple(method:str,
             optimClass = UJDA_Multiple
         case "pan":
             optimClass = PAN_Multiple
+        case "dasa":
+            optimClass = DASA_Multiple
+        case "ccsa":
+            optimClass = CCSA_Multiple
+            # Since we use a contrastive loss we need to have a batch sampler to ensure 
+            # each batch contains positive and negative pairs
+            # Currently this is only identify_sampler
+            if getattr(args, 'sampler', None) is None:
+                raise ValueError("CCSA_Multiple requires a sampler to be set for contrastive loss.")
+        case "bilinear":
+            optimClass = BiLin_Multiple
         case _:
             raise NotImplementedError(f'Method {method} not supported')
     print(f"Creating optimizer for method: {method} (Multiple Domain)")

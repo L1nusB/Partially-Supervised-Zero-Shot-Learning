@@ -52,9 +52,9 @@ class MultiSimilarityLoss(nn.Module):
             pos_pair_ = pos_pair_[pos_pair_ < 1 - epsilon]
             neg_pair_ = sim_mat[i][labels != labels[i]]
             
-            # Can happen when all similarities are too large
+            # Can happen when all similarities are too large or there is no negative pair (in hierarchical uses)
             # would cause error when trying to index in the next step
-            if len(pos_pair_) < 1:
+            if len(neg_pair_) < 1 or len(pos_pair_) < 1:
                 continue
 
             # Will cause issue as we cant guarantee at least one positive and negative pair...

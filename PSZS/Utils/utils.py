@@ -11,8 +11,17 @@ from typing import Optional, Sequence, Tuple, overload
 import argparse
 import ast
 import warnings
+import numpy as np
+
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import matplotlib.colors as col
 
 import torch
+import torch.nn as nn  
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 from timm.data import Mixup, FastCollateMixup
 from timm.scheduler.scheduler import Scheduler
@@ -268,3 +277,257 @@ def is_other_sh_scripts_running():
             continue
 
     return False
+
+def tSNE_A_distance(source_loader: DataLoader, 
+                    target_loader: DataLoader,
+                    model: nn.Module, device: torch.device,
+                    eval_classes: Sequence[int], out_dir: str) -> None:
+    sourceFeatures_base = []
+    sourceFeatures_novel = []
+    targetFeatures_base = []
+    targetFeatures_novel = []
+    model.eval()
+    
+    with torch.no_grad():
+        evals = torch.tensor(eval_classes, device=device)
+        for i, (data, labels) in enumerate(target_loader):
+            k = torch.isin(labels, evals)
+            if any(k) == False:
+                # No Novel classes in this batch
+                targetFeatures_base.append(model(data).cpu())
+            else:
+                datBase = data[~k]
+                datNovel = data[k]
+                targetFeatures_base.append(model(datBase).cpu())
+                targetFeatures_novel.append(model(datNovel).cpu())
+        for i, (data, labels) in enumerate(source_loader):
+            k = torch.isin(labels, evals)
+            if any(k) == False:
+                # No Novel classes in this batch
+                sourceFeatures_base.append(model(data).cpu())
+            else:
+                datBase = data[~k]
+                datNovel = data[k]
+                sourceFeatures_base.append(model(datBase).cpu())
+                sourceFeatures_novel.append(model(datNovel).cpu())
+                
+        targetFeatures_base = torch.cat(targetFeatures_base, dim=0)
+        targetFeatures_novel = torch.cat(targetFeatures_novel, dim=0)
+        targetFeatures = torch.cat([targetFeatures_base, targetFeatures_novel], dim=0)
+        sourceFeatures_base = torch.cat(sourceFeatures_base, dim=0)
+        sourceFeatures_novel = torch.cat(sourceFeatures_novel, dim=0)
+        sourceFeatures = torch.cat([sourceFeatures_base, sourceFeatures_novel], dim=0)
+
+        tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBin.pdf'))
+        tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBinR.pdf'), reduce_dim=50)
+        # tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBinRep.pdf'), reduce_dim=50, reduce_separate=True)
+        tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
+                               targetFeatures_base, targetFeatures_novel,
+                               os.path.join(out_dir, 'tSNEFour.pdf'),)
+        tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
+                               targetFeatures_base, targetFeatures_novel,
+                               os.path.join(out_dir, 'tSNEFourR.pdf'),
+                               reduce_dim=50)
+        # tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
+        #                        targetFeatures_base, targetFeatures_novel,
+        #                        os.path.join(out_dir, 'tSNEFourRSep.pdf'),
+        #                        reduce_dim=50, reduce_separate=True)
+    A_distance_base = calculateADist(sourceFeatures_base, targetFeatures_base, device, progress=False)
+    A_distance_novel = calculateADist(sourceFeatures_novel, targetFeatures_novel, device, progress=False)
+    A_distance_total = calculateADist(sourceFeatures, targetFeatures, device, progress=False)
+    print(f'A-Distance (base): {A_distance_base}, A-Distance (novel): {A_distance_novel}, A-Distance (total): {A_distance_total}')
+    
+    with open(os.path.join(out_dir, 'A-Distance.txt'), 'w') as f:
+        f.write(f'A-Distance (base): {A_distance_base} \n')
+        f.write(f'A-Distance (novel): {A_distance_novel} \n')
+        f.write(f'A-Distance (total): {A_distance_total} \n')
+    
+
+def tSNE_visualize_binary(source_feature: torch.Tensor, target_feature: torch.Tensor,
+              filename: str, source_color='r', target_color='b',
+              reduce_dim: Optional[int] = None, reduce_separate: bool = False):
+    """
+    Visualize features from different domains using t-SNE.
+
+    Args:
+        source_feature (tensor): features from source domain in shape :math:`(minibatch, F)`
+        target_feature (tensor): features from target domain in shape :math:`(minibatch, F)`
+        filename (str): the file name to save t-SNE
+        source_color (str): the color of the source features. Default: 'r'
+        target_color (str): the color of the target features. Default: 'b'
+
+    """
+    source_feature = source_feature.numpy()
+    target_feature = target_feature.numpy()
+    if reduce_dim is not None:
+        if reduce_separate:
+            source_feature = PCA(n_components=reduce_dim).fit_transform(source_feature)
+            target_feature = PCA(n_components=reduce_dim).fit_transform(target_feature)
+            features = np.concatenate([source_feature, target_feature], axis=0)
+        else:
+            features = np.concatenate([source_feature, target_feature], axis=0)
+            features = PCA(n_components=reduce_dim).fit_transform(features)
+    else:
+        features = np.concatenate([source_feature, target_feature], axis=0)
+    # map features to 2-d using TSNE
+    X_tsne = TSNE(n_components=2, random_state=33).fit_transform(features)
+
+    # domain labels, 1 represents source while 0 represents target
+    domains = np.concatenate((np.ones(len(source_feature)), np.zeros(len(target_feature))))
+
+    # visualize using matplotlib
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=domains, cmap=col.ListedColormap([target_color, source_color]), s=20)
+    plt.xticks([])
+    plt.yticks([])
+    plt.savefig(filename)
+    
+def tSNE_visualize_fourway(source_feature_base: torch.Tensor,
+                           source_feature_novel: torch.Tensor, 
+                           target_feature_base: torch.Tensor,
+                           target_feature_novel: torch.Tensor,
+                           filename: str, 
+                           source_base_color='r', 
+                           source_novel_color='g', 
+                           target_base_color='b',
+                           target_novel_color='m',
+                           base_shape = 'o',
+                           novel_shape = '^',
+                           reduce_dim: Optional[int] = None,
+                           reduce_separate: bool = False):
+    """
+    Visualize features from different domains using t-SNE.
+
+    Args:
+        source_feature (tensor): features from source domain in shape :math:`(minibatch, F)`
+        target_feature (tensor): features from target domain in shape :math:`(minibatch, F)`
+        filename (str): the file name to save t-SNE
+        source_color (str): the color of the source features. Default: 'r'
+        target_color (str): the color of the target features. Default: 'b'
+
+    """
+    source_feature_base = source_feature_base.numpy()
+    target_feature_base = target_feature_base.numpy()
+    source_feature_novel = source_feature_novel.numpy()
+    target_feature_novel = target_feature_novel.numpy()
+    if reduce_dim is not None:
+        if reduce_separate:
+            source_feature_base = PCA(n_components=reduce_dim).fit_transform(source_feature_base)
+            source_feature_novel = PCA(n_components=reduce_dim).fit_transform(source_feature_novel)
+            target_feature_base = PCA(n_components=reduce_dim).fit_transform(target_feature_base)
+            target_feature_novel = PCA(n_components=reduce_dim).fit_transform(target_feature_novel)
+            features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
+            features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
+        else:
+            features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
+            features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
+            features_base = PCA(n_components=reduce_dim).fit_transform(features_base)
+            features_novel = PCA(n_components=reduce_dim).fit_transform(features_novel)
+    else:
+        features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
+        features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
+    
+    # map features to 2-d using TSNE
+    X_tsne_base = TSNE(n_components=2, random_state=33).fit_transform(features_base)
+    X_tsne_novel = TSNE(n_components=2, random_state=33).fit_transform(features_novel)
+
+    # domain labels, 1 represents source while 0 represents target
+    domains_base = np.concatenate((np.ones(len(source_feature_base)), np.zeros(len(target_feature_base))))
+    domains_novel = np.concatenate((np.ones(len(source_feature_novel)), np.zeros(len(target_feature_novel))))
+
+    # visualize using matplotlib
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax: plt.Axes
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.scatter(X_tsne_base[:, 0], X_tsne_base[:, 1], marker=base_shape, c=domains_base, cmap=col.ListedColormap([target_base_color, source_base_color]), s=20)
+    ax.scatter(X_tsne_novel[:, 0], X_tsne_novel[:, 1], marker=novel_shape, c=domains_novel, cmap=col.ListedColormap([target_novel_color, source_novel_color]), s=20)
+    # plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=domains, cmap=col.ListedColormap([target_color, source_color]), s=20)
+    plt.xticks([])
+    plt.yticks([])
+    plt.savefig(filename)
+    
+class ANet(nn.Module):
+    def __init__(self, in_feature):
+        super(ANet, self).__init__()
+        self.layer = nn.Linear(in_feature, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.layer(x)
+        x = self.sigmoid(x)
+        return x
+
+def calculateADist(source_feature: torch.Tensor, target_feature: torch.Tensor,
+              device, progress=True, training_epochs=10) -> float:
+    """
+    Calculate the :math:`\mathcal{A}`-distance, which is a measure for distribution discrepancy.
+
+    The definition is :math:`dist_\mathcal{A} = 2 (1-2\epsilon)`, where :math:`\epsilon` is the
+    test error of a classifier trained to discriminate the source from the target.
+
+    Args:
+        source_feature (tensor): features from source domain in shape :math:`(minibatch, F)`
+        target_feature (tensor): features from target domain in shape :math:`(minibatch, F)`
+        device (torch.device)
+        progress (bool): if True, displays a the progress of training A-Net
+        training_epochs (int): the number of epochs when training the classifier
+
+    Returns:
+        :math:`\mathcal{A}`-distance
+    """
+    from torch.utils.data import TensorDataset
+    from torch.optim import SGD
+    from PSZS.Metrics import binary_accuracy
+    
+    source_label = torch.ones((source_feature.shape[0], 1))
+    target_label = torch.zeros((target_feature.shape[0], 1))
+    feature = torch.cat([source_feature, target_feature], dim=0)
+    label = torch.cat([source_label, target_label], dim=0)
+
+    dataset = TensorDataset(feature, label)
+    length = len(dataset)
+    train_size = int(0.8 * length)
+    val_size = length - train_size
+    train_set, val_set = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_loader = DataLoader(train_set, batch_size=2, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=8, shuffle=False)
+
+    anet = ANet(feature.shape[1]).to(device)
+    optimizer = SGD(anet.parameters(), lr=0.01)
+    a_distance = 2.0
+    for epoch in range(training_epochs):
+        anet.train()
+        for (x, label) in train_loader:
+            x = x.to(device)
+            label = label.to(device)
+            anet.zero_grad()
+            y = anet(x)
+            loss = F.binary_cross_entropy(y, label)
+            loss.backward()
+            optimizer.step()
+
+        anet.eval()
+        accAccum = 0
+        normalizer = 0
+        with torch.no_grad():
+            for (x, label) in val_loader:
+                x = x.to(device)
+                label = label.to(device)
+                y = anet(x)
+                acc = binary_accuracy(y, label)
+                accAccum += acc * x.shape[0]
+                normalizer += x.shape[0]
+        accAvg = accAccum / normalizer
+        error = 1 - accAvg / 100
+        a_distance : torch.Tensor = 2 * (1 - 2 * error)
+        if progress:
+            print("epoch {} accuracy: {} A-dist: {}".format(epoch, accAvg, a_distance))
+
+    return a_distance.item()

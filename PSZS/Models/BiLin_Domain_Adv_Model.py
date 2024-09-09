@@ -1,25 +1,13 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional
 import numpy as np
 import numpy.typing as npt
 
-import torch
-import torch.nn as nn
 from torch.nn.modules import Module
-from PSZS.Alignment import WarmStartGradientReverseLayer
 
-from PSZS.Models.CustomModel import CustomModel, PRED_TYPE
+from PSZS.Models.CustomModel import CustomModel
+from PSZS.Alignment import BilinearDomainDiscriminator, BiLinearDomainAdversarialLoss, WarmStartGradientReverseLayer
 
-EXTENDED_PRED_TYPE = Tuple[PRED_TYPE, torch.Tensor]
-
-class MDD_Model(CustomModel):
-    """Custom Model implementing MDD (Margin Disparity Discrepancy)
-    Using a custom adversarial classifier to predict the domain of the input data.
-    Adapted from tllib.alignment.mdd from the tllib library.
-    Based on the paper "Learning to Discover Cross-Domain Relations with Generative Adversarial Networks" by Bousmalis et al.
-    
-    Inputs:
-        - x (tensor): input data fed to `backbone`
-    """
+class BiLin_Domain_Adv_Model(CustomModel):
     def __init__(self, 
                  backbone: Module, 
                  num_classes: npt.NDArray[np.int_], 
@@ -32,6 +20,7 @@ class MDD_Model(CustomModel):
                  grl_lo: float = 0.,
                  grl_hi: float = 1.,
                  grl_max_iters: Optional[int] = None,
+                 bilin_mode: Literal['simple', 'domain', 'classes'] = 'simple',
                  **additional_kwargs) -> None:
         """
         Args:
@@ -45,7 +34,7 @@ class MDD_Model(CustomModel):
         grl_alpha (float): Alpha value for the gradient reversal layer. Defaults to 1.
         grl_lo (float): Lower bound for the gradient reversal layer. Defaults to 0.
         grl_hi (float): Upper bound for the gradient reversal layer. Defaults to 1.
-        grl_max_iters (int): Maximum number of iterations for the gradient reversal layer. Defaults to None.
+        grl_max_iters (int): Maximum number of iterations for the gradient reversal layer. Defaults to 1000.
         additional_kwargs (dict): 
             Keyword arguments of the base class `CustomModel` with default values
             - head_type (str): Type of the head to use. Must be one of the available heads. Defaults to 'SimpleHead'
@@ -74,7 +63,8 @@ class MDD_Model(CustomModel):
         self.grl_hi = grl_hi
         # Will default resolve to 1000 in WarmStartGradientReverseLayer even if None is pased
         # but enables setting to multiple of epochs in optimizers
-        self.grl_max_iters = grl_max_iters
+        self.grl_max_iters = grl_max_iters 
+        self.bilin_mode = bilin_mode
         super().__init__(backbone=backbone, 
                          num_classes=num_classes,
                          num_inputs=num_inputs, 
@@ -82,61 +72,75 @@ class MDD_Model(CustomModel):
                          opt_kwargs=opt_kwargs,
                          sched_kwargs=sched_kwargs,
                          **additional_kwargs)
+
     
     def _register_da_components(self, **kwargs) -> None:
-        """Construct the gradient reversal layer and the adversarial classifier.
-        The weights of the adversarial classifier are initialized randomly.
+        """Construct the domain adversarial loss.
+        In the process the domain discriminator and gradient reversal layer are constructed
+        but not registered as model components.
         Hidden size is updated to be smaller than the feature dimension if necessary."""
-        # No need to send to device as this is done in models.py when constructing the model
-        self.grl = WarmStartGradientReverseLayer(alpha=self.grl_alpha, 
-                                                 lo=self.grl_lo, 
-                                                 hi=self.grl_hi, 
-                                                 max_iters=self.grl_max_iters, 
-                                                 auto_step=True)
-        # Get the effective head prediction size i.e. the number of classes for the main hierarchy level
-        # Use max which should correspond to the source anyways (otherwise it was explicitly allowed or warned against)
-        # via allow_mix_num_classes or allow_non_strict_num_classes_order in get_largest_head_num_classes() in custom_classifier.py
-        adv_num_classes = self.classifier.largest_num_classes_test_lvl
         # Try to use given hidden layer as long as sufficient features are available
         # or half of the feature dimension
         self.hidden_size = self.hidden_size if self.feature_dim > self.hidden_size else int(self.feature_dim / 2)
-        self.adv_classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, self.hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(self.hidden_size, adv_num_classes)
-        )
-        # Fill with random values (initialize)
-        # Not sure if this is necessary as pytorch does this by default (but maybe with different scheme)
-        for dep in range(2):
-            self.adv_classifier[dep * 3].weight.data.normal_(0, 0.01)
-            self.adv_classifier[dep * 3].bias.data.fill_(0.0)
-                    
-    def forward(self, x: torch.Tensor) -> EXTENDED_PRED_TYPE | Tuple[PRED_TYPE, torch.Tensor]:
-        """During training additionally return predictions of an adversarial classifier."""
-        f = self.backbone(x)
-        f = self.bottleneck(f)
-        if self.training:
-            predictions = self.classifier(f)
-            f_adv = self.grl(f)
-            # For multiple model the adv prediction still needs to be split
-            # according to the respective batch sizes
-            predictions_adv = self.adv_classifier(f_adv)
-            return (predictions, predictions_adv), f
+        grl = WarmStartGradientReverseLayer(alpha=self.grl_alpha, 
+                                            lo=self.grl_lo, 
+                                            hi=self.grl_hi, 
+                                            max_iters=self.grl_max_iters, 
+                                            auto_step=False)
+        num_total_classes = self.classifier.largest_num_classes_test_lvl
+        num_shared_classes = self.classifier.smallest_num_classes_test_lvl
+        num_novel_classes = num_total_classes - num_shared_classes
+        if self.bilin_mode == 'simple':
+            # No need to send to device as this is done in models.py when constructing the model
+            bilin_domain_discriminator = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                    in_feature2=num_shared_classes,
+                                                                    hidden_size=self.hidden_size)
+            self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator,
+                                                                                    grl=grl, mode='simple')
+        elif self.bilin_mode == 'domain':
+            # No need to send to device as this is done in models.py when constructing the model
+            bilin_domain_discriminator_source = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                    in_feature2=num_total_classes,
+                                                                    hidden_size=self.hidden_size)
+            bilin_domain_discriminator_target = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                    in_feature2=num_shared_classes,
+                                                                    hidden_size=self.hidden_size)
+            self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator_source,
+                                                                                    domain_discriminator_o=bilin_domain_discriminator_target,
+                                                                                    grl=grl, mode='domains')
+        elif self.bilin_mode == 'classes':
+            # No need to send to device as this is done in models.py when constructing the model
+            bilin_domain_discriminator_shared = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                    in_feature2=num_shared_classes,
+                                                                    hidden_size=self.hidden_size)
+            bilin_domain_discriminator_novel = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                    in_feature2=num_novel_classes,
+                                                                    hidden_size=self.hidden_size)
+            # Mask will must be set in optimizer
+            self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator_shared,
+                                                                                    domain_discriminator_o=bilin_domain_discriminator_novel,
+                                                                                    grl=grl, mode='classes')
         else:
-            predictions = self.classifier.forward_test(f)
-            return predictions
-        
+            raise ValueError(f"Unknown bilin_mode: {self.bilin_mode}")
+    
     def val_test_state_dict(self) -> Dict[str, Any]:
-        """"""
         val_test_state_dict = super().val_test_state_dict()
-        val_test_state_dict.update({f'adv_classifier.{k}':v for k,v in self.adv_classifier.state_dict().items()})
+        val_test_state_dict.update({f'domain_adversarial_loss.{k}':v for k,v in self.bilin_domain_adversarial_loss.state_dict().items()})
         return val_test_state_dict
+    
+    # # Check whether to use higher learning rate for domain discriminator
+    # def model_or_params(self) -> Dict[str, Any]:
+    #     params = [{"params": self.backbone.parameters(), 'weight_decay':0},
+    #               {"params": self.bottleneck.parameters()},
+    #               {"params": self.classifier.parameters()}]
+    #     params.append({'params': self.domain_adversarial_loss.domain_discriminator.parameters(), 'lr': 1.})
+    #     return params
         
     def get_model_kwargs(**kwargs) -> dict:
-        """Dynamically resolve relevant kwargs for model construction.
-        """
-        params, kwargs = super(MDD_Model, MDD_Model).get_model_kwargs(**kwargs)
+        """Dynamically resolve relevant kwargs for model construction."""
+        # Need for unbound super call
+        # https://stackoverflow.com/questions/26788214/super-and-staticmethod-interaction
+        params, kwargs = super(BiLin_Domain_Adv_Model, BiLin_Domain_Adv_Model).get_model_kwargs(**kwargs)
         if 'hidden_size' in kwargs:
             params['hidden_size'] = kwargs.get('hidden_size')
             kwargs.pop('hidden_size')
@@ -146,13 +150,13 @@ class MDD_Model(CustomModel):
         if 'grl_lo' in kwargs:
             params['grl_lo'] = kwargs.get('grl_lo')
             kwargs.pop('grl_lo')
-        if 'randomized' in kwargs:
-            params['randomized'] = kwargs.get('randomized')
-            kwargs.pop('randomized')
         if 'grl_hi' in kwargs:
             params['grl_hi'] = kwargs.get('grl_hi')
             kwargs.pop('grl_hi')
         if 'grl_max_iters' in kwargs:
             params['grl_max_iters'] = kwargs.get('grl_max_iters')
             kwargs.pop('grl_max_iters')
+        if 'bilin_mode' in kwargs:
+            params['bilin_mode'] = kwargs.get('bilin_mode')
+            kwargs.pop('bilin_mode')
         return params, kwargs

@@ -4,10 +4,21 @@ from collections import defaultdict
 from typing import Optional
 import numpy as np
 from torch.utils.data.sampler import Sampler
+import itertools
 
 from PSZS.datasets import CustomDataset
 
-class RandomIdentitySampler(Sampler):
+SAMPLER_MAP = {
+    'random': 'RandomIdentitySampler',
+    'fixed': 'FixedIdentitySampler',
+}
+
+AVAI_SAMPLERS = [
+    'RandomIdentitySampler', 'FixedIdentitySampler',
+] + list(SAMPLER_MAP.keys())
+
+
+class CustomSampler(Sampler):
     """
     Randomly sample N identities, then for each identity,
     randomly sample K instances, therefore batch size is N*K.
@@ -20,7 +31,7 @@ class RandomIdentitySampler(Sampler):
                  num_labels: Optional[int] = None, 
                  num_instances: Optional[int] = None, 
                  batch_size: Optional[int] = None, 
-                 max_iters: Optional[int] = None,):
+                 max_iters: Optional[int] = None):
         """Randomly sample N identities, then for each identity,
         randomly sample K instances, therefore batch size is N*K.
 
@@ -84,7 +95,7 @@ class RandomIdentitySampler(Sampler):
         return self.__str__()
 
     def __str__(self):
-        return f"|Sampler| iters {self.max_iters}| K {self.num_instances_per_label}| M {self.num_labels_per_batch}|"
+        return f"|Sampler| iters {self.max_iters}| K {self.num_instances_per_label}| N {self.num_labels_per_batch}|"
 
     def _prepare_batch(self):
         batch_idxs_dict = defaultdict(list)
@@ -99,6 +110,70 @@ class RandomIdentitySampler(Sampler):
 
         avai_labels = copy.deepcopy(self.labels)
         return batch_idxs_dict, avai_labels
+    
+    def __iter__(self):
+        raise NotImplementedError("Base class CustomSampler cannot be used directly.")
+    
+
+class FixedIdentitySampler(CustomSampler):
+    """
+    Randomly sample N identities representing one of the available labels.
+    Select the next L labels from a continuous range from `0` to `total_fixed_labels`
+    and then randomly sample N-L identities from the remaining labels.
+    For each identity, randomly sample K instances, therefore batch size is N*K.
+    
+    Code adapted from:
+        `<https://github.com/phucty/Deep_metric>`
+        `<https://github.com/KaiyangZhou/deep-person-reid/blob/master/torchreid/losses/hard_mine_triplet_loss.py>`
+    """
+    def __init__(self, dataset: CustomDataset, 
+                 num_labels: Optional[int] = None, 
+                 num_instances: Optional[int] = None, 
+                 batch_size: Optional[int] = None, 
+                 max_iters: Optional[int] = None,
+                 num_fixed_labels: Optional[int] = None,
+                 total_fixed_labels: Optional[int] = None):
+        """Randomly sample N identities representing one of the available labels.
+        Select the next L labels from a continuous range from `0` to `total_fixed_labels`
+        and then randomly sample N-L identities from the remaining labels.
+        For each identity, randomly sample K instances, therefore batch size is N*K.
+        
+        This sampler ensures that batches are created with a fixed number of deterministically predictable labels.
+        The individual samples for each label are still randomly selected.
+
+        Args:
+            dataset (CustomDataset): 
+                Dataset to sample from.
+            num_labels (Optional[int], optional): 
+                Number of different labels per identity in a batch. If not given will be set dynamically 
+                based on `num_instances` and `batch_size` and internal default of `16`. Defaults to None.
+            num_instances (Optional[int], optional): 
+                Number of instances per identity in a batch. If not given will be set dynamically 
+                based on `num_instances` and `batch_size` and internal default of `4`. Defaults to None.
+            batch_size (Optional[int], optional): 
+                Desired batch size. Will be adjusted if does not match `num_instances` and `num_labels` 
+                or set as their product if not specified. Defaults to None.
+            max_iters (Optional[int], optional): 
+                Specific number of iterations the sampler will run for. Defaults to None.
+            num_fixed_labels (Optional[int], optional):
+                Number of fixed labels to select from the available labels in each batch. 
+                Set to `num_labels-1` if not specified. Defaults to None.
+            total_fixed_labels (Optional[int], optional):
+                Total number of labels to select from. Fixed labels are selected from a continuous range of `0` to `total_fixed_labels`. 
+                Set to `len(self.labels)` if not specified. Defaults to None.
+        """
+        super().__init__(dataset=dataset, num_labels=num_labels, num_instances=num_instances, 
+                         batch_size=batch_size, max_iters=max_iters)
+        if total_fixed_labels is None:
+            total_fixed_labels = len(self.labels)
+        self.total_fixed_labels = total_fixed_labels
+        if num_fixed_labels is None:
+            num_fixed_labels = max(0, self.num_labels_per_batch-1)
+        self.num_fixed_labels = min(num_fixed_labels, self.num_labels_per_batch-1)
+        self.fixed_label = itertools.cycle(range(self.total_fixed_labels))
+
+    def __str__(self):
+        return f"|FixedSampler| iters {self.max_iters}| K {self.num_instances_per_label}| N {self.num_labels_per_batch}| L {self.num_fixed_labels}|"
 
     def __iter__(self):
         batch_idxs_dict, avai_labels = self._prepare_batch()
@@ -107,6 +182,64 @@ class RandomIdentitySampler(Sampler):
             if len(avai_labels) < self.num_labels_per_batch:
                 batch_idxs_dict, avai_labels = self._prepare_batch()
 
+            # Use set to make lookup O(1)
+            fixed_labels = set([self.labels[fixed] for fixed in list(itertools.islice(self.fixed_label, self.num_fixed_labels))])
+            if any([label not in avai_labels for label in fixed_labels]):
+                batch_idxs_dict, avai_labels = self._prepare_batch()
+                
+            selected_labels = list(fixed_labels) + random.sample([l for l in avai_labels if l not in fixed_labels], 
+                                                                self.num_labels_per_batch-self.num_fixed_labels)
+            for label in selected_labels:
+                batch_idxs = batch_idxs_dict[label].pop(0)
+                batch.extend(batch_idxs)
+                if len(batch_idxs_dict[label]) == 0:
+                    avai_labels.remove(label)
+            yield batch
+
+class RandomIdentitySampler(CustomSampler):
+    """
+    Randomly sample N identities, then for each identity,
+    randomly sample K instances, therefore batch size is N*K.
+    
+    Code adapted from:
+        `<https://github.com/phucty/Deep_metric>`
+        `<https://github.com/KaiyangZhou/deep-person-reid/blob/master/torchreid/losses/hard_mine_triplet_loss.py>`
+    """
+    def __init__(self, dataset: CustomDataset, 
+                 num_labels: Optional[int] = None, 
+                 num_instances: Optional[int] = None, 
+                 batch_size: Optional[int] = None, 
+                 max_iters: Optional[int] = None,):
+        """
+        Args:
+            dataset (CustomDataset): 
+                Dataset to sample from.
+            num_labels (Optional[int], optional): 
+                Number of different labels per identity in a batch. If not given will be set dynamically 
+                based on `num_instances` and `batch_size` and internal default of `16`. Defaults to None.
+            num_instances (Optional[int], optional): 
+                Number of instances per identity in a batch. If not given will be set dynamically 
+                based on `num_instances` and `batch_size` and internal default of `4`. Defaults to None.
+            batch_size (Optional[int], optional): 
+                Desired batch size. Will be adjusted if does not match `num_instances` and `num_labels` 
+                or set as their product if not specified. Defaults to None.
+            max_iters (Optional[int], optional): 
+                Specific number of iterations the sampler will run for. Defaults to None.
+
+        """
+        super().__init__(dataset=dataset, num_labels=num_labels, num_instances=num_instances, 
+                         batch_size=batch_size, max_iters=max_iters)
+
+    def __str__(self):
+        return f"|RandomSampler| iters {self.max_iters}| K {self.num_instances_per_label}| N {self.num_labels_per_batch}| L {self.num_fixed_labels}|"
+
+    def __iter__(self):
+        batch_idxs_dict, avai_labels = self._prepare_batch()
+        for _ in range(self.max_iters):
+            batch = []
+            if len(avai_labels) < self.num_labels_per_batch:
+                batch_idxs_dict, avai_labels = self._prepare_batch()
+                
             selected_labels = random.sample(avai_labels, self.num_labels_per_batch)
             for label in selected_labels:
                 batch_idxs = batch_idxs_dict[label].pop(0)
@@ -114,3 +247,57 @@ class RandomIdentitySampler(Sampler):
                 if len(batch_idxs_dict[label]) == 0:
                     avai_labels.remove(label)
             yield batch
+            
+def build_sampler(
+    dataset: CustomDataset,
+    sampler: str,
+    num_labels: Optional[int] = None, 
+    num_instances: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    max_iters: Optional[int] = None,
+    **kwargs
+) -> CustomSampler:
+    """Builds a training sampler.
+
+    Args:
+        dataset (CustomDataset): 
+            Dataset to sample from.
+        sampler (str): 
+            Name of the sampler to use.
+        num_labels (Optional[int], optional): 
+            Number of different labels per identity in a batch. If not given will be set dynamically 
+            based on `num_instances` and `batch_size` and internal default of `16`. Defaults to None.
+        num_instances (Optional[int], optional): 
+            Number of instances per identity in a batch. If not given will be set dynamically 
+            based on `num_instances` and `batch_size` and internal default of `4`. Defaults to None.
+        batch_size (Optional[int], optional): 
+            Desired batch size. Will be adjusted if does not match `num_instances` and `num_labels` 
+            or set as their product if not specified. Defaults to None.
+        max_iters (Optional[int], optional): 
+            Specific number of iterations the sampler will run for. Defaults to None.
+    """
+    if sampler.lower() in SAMPLER_MAP:
+        sampler = SAMPLER_MAP[sampler.lower()]
+    
+    assert sampler in AVAI_SAMPLERS, \
+        'sampler must be one of {}, but got {}'.format(AVAI_SAMPLERS, sampler)
+
+    
+    if sampler == 'RandomIdentitySampler':
+        sampler = RandomIdentitySampler(dataset=dataset, 
+                                        num_labels=num_labels, 
+                                        num_instances=num_instances,
+                                        batch_size=batch_size,
+                                        max_iters=max_iters)
+    elif sampler == 'FixedIdentitySampler':
+        sampler = FixedIdentitySampler(dataset=dataset, 
+                                       num_labels=num_labels, 
+                                       num_instances=num_instances,
+                                       batch_size=batch_size,
+                                       max_iters=max_iters,
+                                       num_fixed_labels=kwargs.get('num_fixed_labels', None),
+                                       total_fixed_labels=kwargs.get('total_fixed_labels', None))
+    else:
+        raise ValueError(f"Sampler {sampler} not available.")
+
+    return sampler

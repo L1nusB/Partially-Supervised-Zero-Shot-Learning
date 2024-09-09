@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import numpy as np
 import numpy.typing as npt
 
@@ -25,7 +25,7 @@ class Domain_Adv_Model(CustomModel):
                  grl_alpha: float = 1.,
                  grl_lo: float = 0.,
                  grl_hi: float = 1.,
-                 grl_max_iters: int = 1000,
+                 grl_max_iters: Optional[int] = None,
                  **additional_kwargs) -> None:
         """
         Args:
@@ -66,7 +66,9 @@ class Domain_Adv_Model(CustomModel):
         self.grl_alpha = grl_alpha
         self.grl_lo = grl_lo
         self.grl_hi = grl_hi
-        self.grl_max_iters = grl_max_iters
+        # Will default resolve to 1000 in WarmStartGradientReverseLayer even if None is pased
+        # but enables setting to multiple of epochs in optimizers
+        self.grl_max_iters = grl_max_iters 
         super().__init__(backbone=backbone, 
                          num_classes=num_classes,
                          num_inputs=num_inputs, 
@@ -122,9 +124,6 @@ class Domain_Adv_Model(CustomModel):
         if 'grl_lo' in kwargs:
             params['grl_lo'] = kwargs.get('grl_lo')
             kwargs.pop('grl_lo')
-        if 'randomized' in kwargs:
-            params['randomized'] = kwargs.get('randomized')
-            kwargs.pop('randomized')
         if 'grl_hi' in kwargs:
             params['grl_hi'] = kwargs.get('grl_hi')
             kwargs.pop('grl_hi')

@@ -47,14 +47,14 @@ class WarmStartGradientReverseLayer(nn.Module):
               Otherwise use function `step` to increase `iter_num`. Default: False
         """
 
-    def __init__(self, alpha: Optional[float] = 1.0, lo: Optional[float] = 0.0, hi: Optional[float] = 1.,
-                 max_iters: Optional[int] = 1000., auto_step: Optional[bool] = False):
+    def __init__(self, alpha: float = 1.0, lo: float = 0.0, hi: float = 1.,
+                 max_iters: Optional[int] = 1000, auto_step: bool = False):
         super(WarmStartGradientReverseLayer, self).__init__()
         self.alpha = alpha
         self.lo = lo
         self.hi = hi
         self.iter_num = 0
-        self.max_iters = max_iters
+        self.max_iters = max_iters or 1000
         self.auto_step = auto_step
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

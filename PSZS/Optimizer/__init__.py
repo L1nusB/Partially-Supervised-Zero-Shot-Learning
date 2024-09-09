@@ -11,6 +11,9 @@ from .MCD_Multiple import MCD_Multiple
 from .MDD_Multiple import MDD_Multiple
 from .UJDA_Multiple import UJDA_Multiple
 from .PAN_Multiple import PAN_Multiple
+from .DASA_Multiple import DASA_Multiple
+from .CCSA_Multiple import CCSA_Multiple
+from .BiLin_Multiple import BiLin_Multiple
 from .utils import get_optim
 
 __all__ = ['get_optim', 'ERM_Multiple', 
@@ -20,4 +23,6 @@ __all__ = ['get_optim', 'ERM_Multiple',
            'MCD_Multiple', 'MDD_Multiple',
            'Base_Optimizer', 'PAN_Multiple',
            'UJDA_Multiple', 'MCD_Multiple',
-           'Base_Single', 'ERM_Single']
+           'Base_Single', 'ERM_Single',
+           'DASA_Multiple', 'CCSA_Multiple',
+           'BiLin_Multiple']

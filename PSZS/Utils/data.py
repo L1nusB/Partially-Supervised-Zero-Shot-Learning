@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from PSZS.datasets.datasets import get_dataset, build_transform
 from PSZS.datasets import DatasetDescriptor
 from PSZS.Utils.dataloader import build_dataloader, ForeverDataIterator
-from PSZS.Utils.sampler import RandomIdentitySampler
+from PSZS.Utils.sampler import build_sampler
 
 def create_data_objects(args: Namespace,
                         batch_size: int | Sequence[int],
@@ -117,7 +117,7 @@ def prepare_data_train(
         "use_prefetcher":not args.no_prefetch,
         # Shuffle is mutually exclusive with batch_sampler
         # RandomSampler will produce a type of shuffling.
-        "shuffle": False if getattr(args, 'identity_sampler', False) else True, 
+        "shuffle": False if getattr(args, 'sampler', None) is not None else True, 
     })
     
     transform_args = dict({
@@ -155,7 +155,7 @@ def prepare_data_train(
         "transform":transform_train,
         "phase":'train' if use_phase else None,
         "infer_all_classes":getattr(args, "infer_all_class_levels", False),
-        "label_index": getattr(args, 'identity_sampler', False)
+        "label_index": getattr(args, 'sampler', None) is not None
     })
     
     # Is set to None if not given as parameter
@@ -165,16 +165,7 @@ def prepare_data_train(
     dataset_source = get_dataset(dataset_name=args.data,
                                  tasks=args.source,
                                  **dataset_args)
-    
-    if getattr(args, 'identity_sampler', False):
-        # num_instances will use the internal default of 4
-        dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=batch_size[0])
-    dataloader_args['collate_fn'] = collate_fn[0]
-    loader_source = build_dataloader(dataset=dataset_source,
-                                      batch_size=batch_size[0],
-                                      **dataloader_args)
-    iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
-    
+    # We need information about the target dataset classes for the sampler
     if shared:
         # Is set to None if not given as parameter
         dataset_args["descriptor"] = descriptor[1]
@@ -183,9 +174,37 @@ def prepare_data_train(
         dataset_target = get_dataset(dataset_name=args.data,
                                      tasks=getattr(args, shared_key),
                                      **dataset_args)
-        if getattr(args, 'identity_sampler', False):
-            # num_instances will use the internal default of 4
-            dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_target, batch_size=batch_size[1])
+    
+    if getattr(args, 'sampler', None) is not None:
+        dataloader_args["batch_sampler"] = build_sampler(dataset=dataset_source, 
+                                                         sampler=args.sampler,
+                                                         num_labels=args.sampler_num_labels,
+                                                         num_instances=args.sampler_num_instances,
+                                                         batch_size=batch_size[0],
+                                                         total_fixed_labels=len(dataset_target.eval_classes),
+                                                         **args.sampler_kwargs)
+    dataloader_args['collate_fn'] = collate_fn[0]
+    loader_source = build_dataloader(dataset=dataset_source,
+                                      batch_size=batch_size[0],
+                                      **dataloader_args)
+    iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
+    
+    if shared:
+        # # Is set to None if not given as parameter
+        # dataset_args["descriptor"] = descriptor[1]
+        # dataset_args["descriptor_file"] = "descriptor_shared.txt"
+        # dataset_args["transform"] = transform_train_aug if apply_aug[1] else transform_train
+        # dataset_target = get_dataset(dataset_name=args.data,
+        #                              tasks=getattr(args, shared_key),
+        #                              **dataset_args)
+        if getattr(args, 'sampler', None) is not None:
+                    dataloader_args["batch_sampler"] = build_sampler(dataset=dataset_target, 
+                                                                    sampler=args.sampler,
+                                                                    num_labels=args.sampler_num_labels,
+                                                                    num_instances=args.sampler_num_instances,
+                                                                    batch_size=batch_size[1],
+                                                                    total_fixed_labels=len(dataset_target.eval_classes),
+                                                                    **args.sampler_kwargs)
         dataloader_args['collate_fn'] = collate_fn[1]
         loader_target = build_dataloader(dataset=dataset_target,
                                           batch_size=batch_size[1],
@@ -197,17 +216,27 @@ def prepare_data_train(
         if rebalance: 
             if ensure_balance:
                 print(f"Rebalancing batch sizes to {bs_source} and {bs_target} for source and target shared domain.")
-                if getattr(args, 'identity_sampler', False):
-                    # This can again change the batch size (only increase) by maximally 4 (default for num_instances)
-                    dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=bs_source)
+                if getattr(args, 'sampler', None) is not None:
+                    dataloader_args["batch_sampler"] = build_sampler(dataset=dataset_target, 
+                                                                    sampler=args.sampler,
+                                                                    num_labels=args.sampler_num_labels,
+                                                                    num_instances=args.sampler_num_instances,
+                                                                    batch_size=bs_source,
+                                                                    total_fixed_labels=len(dataset_target.eval_classes),
+                                                                    **args.sampler_kwargs)
                 loader_source = build_dataloader(dataset=dataset_source,
                                         batch_size=bs_source,
                                         **dataloader_args)
                 iter_source = ForeverDataIterator(loader_source, device, on_device=not args.no_prefetch)
                 
-                if getattr(args, 'identity_sampler', False):
-                    # This can again change the batch size (only increase) by maximally 4 (default for num_instances)
-                    dataloader_args["batch_sampler"] = RandomIdentitySampler(dataset_source, batch_size=bs_target)
+                if getattr(args, 'sampler', None) is not None:
+                    dataloader_args["batch_sampler"] = build_sampler(dataset=dataset_target, 
+                                                                    sampler=args.sampler,
+                                                                    num_labels=args.sampler_num_labels,
+                                                                    num_instances=args.sampler_num_instances,
+                                                                    batch_size=bs_target,
+                                                                    total_fixed_labels=len(dataset_target.eval_classes),
+                                                                    **args.sampler_kwargs)
                 loader_target = build_dataloader(dataset=dataset_target,
                                             batch_size=bs_target,
                                             **dataloader_args)
@@ -305,7 +334,7 @@ def prepare_data_test_custom(
         collate_fn: Optional[Callable] = None,
         img_dtype: torch.dtype = torch.float32,
         descriptor: Optional[DatasetDescriptor] = None,
-        task_key: str = 'tasks',
+        task_key: str  = 'tasks',
         use_phase: bool = True,
     ) -> DataLoader:
     # Prepare validation data
@@ -342,7 +371,7 @@ def prepare_data_test_custom(
     })
     
     dataset = get_dataset(dataset_name=args.data,
-                          tasks=getattr(args, task_key),
+                          tasks=getattr(args, task_key, [task_key]),
                           **dataset_args)
     loader = build_dataloader(dataset=dataset, **loader_args)
     

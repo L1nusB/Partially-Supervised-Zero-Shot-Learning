@@ -21,6 +21,9 @@ class BilinearDomainDiscriminator(nn.Module):
                  in_feature2: int, 
                  hidden_size: int, ):
         super().__init__()
+        self.in_feature1 = in_feature1
+        self.in_feature2 = in_feature2
+        
         self.bilinear = nn.Bilinear(in_feature1, in_feature2, hidden_size)
         self.bilinear.weight.data.normal_(0, 0.01)
         self.bilinear.bias.data.fill_(0.0)

@@ -30,8 +30,12 @@ class DistanceWeightedSampling(object):
             # sample positives randomly
             pos[i] = 0
             positives.append(np.random.choice(np.where(pos)[0]))
-            # sample negatives by distance
-            negatives.append(np.random.choice(bs, p=q_d_inv))
+            # Check if there are NaNs which indicate that there is no negative sample
+            if any(np.isnan(q_d_inv)):
+                negatives.append(np.nan)
+            else:
+                # sample negatives by distance
+                negatives.append(np.random.choice(bs, p=q_d_inv))
 
         sampled_triplets = [[a, p, n] for a, p, n in zip(list(range(bs)), positives, negatives)]
         return sampled_triplets
@@ -97,6 +101,10 @@ class MarginLoss(nn.Module):
             labels = labels.detach().cpu().numpy()
         sampled_triplets = self.sampler.sample(batch, labels)
 
+        # Check if there are NaNs which indicate that there is no negative sample (happens in hierarchical uses)
+        if any([np.isnan(triplet[2]) for triplet in sampled_triplets]):
+            return torch.tensor(0.0, requires_grad=True, device=batch.device)
+        
         # compute distances between anchor-positive and anchor-negative.
         d_ap, d_an = [], []
         for triplet in sampled_triplets:
