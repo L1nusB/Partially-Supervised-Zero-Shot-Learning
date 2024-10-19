@@ -15,7 +15,7 @@ with open('requirements.txt') as f:
 if __name__ == '__main__':
     setup(
         name="PSZS", # Replace with your own username
-        version=0.1,
+        version=1.0,
         author="Linus Beckhaus",
         author_email="unrpa@student.kit.edu",
         keywords="domain adaptation, task adaptation, domain generalization, "
@@ -23,7 +23,7 @@ if __name__ == '__main__':
         description="Fork of THUML Framework for Domain Adaptation in Partially Supervised Zero Shot Setting",
         long_description=open('README.md', encoding='utf8').read(),
         long_description_content_type="text/markdown",
-        url="https://github.com/thuml/Transfer-Learning-Library",
+        url="https://github.com/L1nusB/CodeBaseClean",
         packages=find_packages(exclude=['docs', 'examples','Datasets','Logs', 
                                         'runconfigs', 'checkpoints']),
         classifiers=[
@@ -31,7 +31,7 @@ if __name__ == '__main__':
             #   3 - Alpha
             #   4 - Beta
             #   5 - Production/Stable
-            'Development Status :: 3 - Alpha',
+            'Development Status :: 4 - Beta',
             # Indicate who your project is intended for
             'Intended Audience :: Science/Research',
             'Topic :: Scientific/Engineering :: Artificial Intelligence',
@@ -40,11 +40,11 @@ if __name__ == '__main__':
             'License :: OSI Approved :: MIT License',
             # Specify the Python versions you support here. In particular, ensure
             # that you indicate whether you support Python 2, Python 3 or both.
-            'Programming Language :: Python :: 3.6',
-            'Programming Language :: Python :: 3.7',
-            'Programming Language :: Python :: 3.8',
+            'Programming Language :: Python :: 3.9',
+            'Programming Language :: Python :: 3.10',
+            'Programming Language :: Python :: 3.11',
         ],
-        python_requires='>=3.6',
+        python_requires='>=3.9',
         install_requires=REQUIRES,
         extras_require={
             'dev': [

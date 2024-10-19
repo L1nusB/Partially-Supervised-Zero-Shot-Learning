@@ -55,8 +55,12 @@ def save_checkpoint(model: CustomModel,
                     optimizer: Base_Optimizer,
                     metric: str,
                     current_best: float,
-                    save_val_test: bool = False,):
+                    save_val_test: bool = False,
+                    guarantee: bool = False):
     torch.save(model.state_dict(), logger.get_checkpoint_path('latest'))
+    if guarantee:
+        # Name will be set as the epoch
+        torch.save(model.state_dict(), logger.get_checkpoint_path())
     if save_val_test:
         torch.save(model.val_test_state_dict(), logger.get_checkpoint_path('latest_val_test'))
     match metric:

@@ -52,6 +52,7 @@ class Logger:
         else:
             self.checkpoint_directory = os.path.join(self.out_dir, 'checkpoints')
         self.epoch = 0
+        self.visualization_dir = os.path.join(self.out_dir, 'visualizations')
 
         os.makedirs(self.out_dir, exist_ok=True)
         if create_checkpoint:
@@ -71,10 +72,14 @@ class Logger:
         sys.stdout = self.logger
         sys.stderr = self.logger
 
-    def set_epoch(self, epoch):
-        """Set the epoch number. Please use it during training."""
-        os.makedirs(os.path.join(self.visualize_directory, str(epoch)), exist_ok=True)
+    def set_epoch(self, epoch: int):
+        """Set the epoch number."""
+        # os.makedirs(os.path.join(self.visualize_directory, str(epoch)), exist_ok=True)
         self.epoch = epoch
+        
+    def get_visualization_dir(self) -> str:
+        os.makedirs(self.visualization_dir, exist_ok=True)
+        return self.visualization_dir
 
     def get_checkpoint_path(self, name=None):
         """
@@ -82,12 +87,12 @@ class Logger:
 
         Args:
             name (optional): the filename (without file extension) to save checkpoint.
-                If None, checkpoint will be saved to ``{epoch}.pth``.
+                If None, checkpoint will be saved to ``Epoch_{epoch}.pth``.
                 Otherwise, will be saved to ``{phase}.pth``.
 
         """
         if name is None:
-            name = str(self.epoch)
+            name = f'Epoch_{self.epoch}'
         name = str(name)
         if name[-4:] != '.pth':
             name += '.pth'

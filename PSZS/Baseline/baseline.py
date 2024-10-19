@@ -6,6 +6,7 @@ import json
 import math
 import numpy as np
 import os
+import copy
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -19,10 +20,11 @@ from PSZS.Optimizer import get_optim
 from PSZS.Utils.data import create_data_objects
 from PSZS.Utils.io import filewriter
 import PSZS.Utils.utils as utils
+import PSZS.Utils.Eval as eval_utils
 from PSZS.Utils.sampler import AVAI_SAMPLERS
 from PSZS.Models import *
 from PSZS.Validator.Validator import Validator
-from PSZS.datasets import build_remapped_descriptors, build_descriptor
+from PSZS.datasets import build_remapped_descriptors, build_descriptor, resolve_dataaug
 from PSZS.AWS import setup_aws, handle_aws_postprocessing
 
 HIERARCHICAL_HEAD = ['HierarchicalHead','CoupledHead']
@@ -68,6 +70,22 @@ def main(args):
     args.eval_base = not args.no_base_eval
     args.aug_source = not args.no_aug_source
     args.aug_target = not args.no_aug_target
+    args.dataaug = args.dataaug # Temporary to allow change into negative argument
+    args.additional_metrics = not args.no_additional_metrics
+    if args.dataaug:
+        print("Automatically setting data augmentation fields.")
+        resolve_dataaug(args)
+    
+    # This order is important as save epochs should enforce keep_unneeded_checkpoints
+    # but if save_epochs is set due to domain_measure_epochs it should not enforce keep_unneeded_checkpoints
+    if args.save_epochs:
+        print("Save checkpoints for each epoch is enabled. Setting keep_unneeded_checkpoints to True.")
+        args.keep_unneeded_checkpoints = True
+        
+    if args.domain_measure_epochs:
+        print("Domain measure epochs is set. Enabling saving of checkpoints each epoch and additional metrics.")
+        args.save_epochs = True
+        args.additional_metrics = True
 
     print(args)
     
@@ -314,33 +332,11 @@ def main(args):
     f1 = runner.eval_f1
     print(f"Best Top 1 Accuracy on Test: {acc1:3.2f}, F1 on Test: {f1:3.2f}")
     print(f'Total time: {time.time() - start_time}')
-    # Delete .latest checkpoint as it is not needed anymore
-    if os.path.exists(logger.get_checkpoint_path('latest')):
-        os.remove(logger.get_checkpoint_path('latest'))
     
-    if getattr(args, "no_additional_metrics", False) == False:
-        print("Creation of tSNE and A-Distance")
-        load_checkpoint(model, checkpoint_path=logger.get_checkpoint_path('best'), strict=True)
-        test_loader = create_data_objects(args=args, 
-                                            batch_size=args.batch_size,
-                                            phase='test',
-                                            device=device,
-                                            descriptor=train_source_iter.dataset_descriptor,
-                                            include_source_val_test=False)[0]
-        test_loader_source = create_data_objects(args=args, 
-                                            batch_size=args.batch_size,
-                                            phase='custom_test',
-                                            device=device,
-                                            descriptor=train_source_iter.dataset_descriptor,
-                                            task_key='wTot',
-                                            include_source_val_test=False)
-
-        utils.tSNE_A_distance(source_loader=test_loader_source,
-                              target_loader=test_loader,
-                              model=model.backbone,
-                              device=device,
-                              eval_classes=eval_classes,
-                              out_dir=logger.out_dir,)
+    if args.keep_unneeded_checkpoints == False or args.no_save:
+        # Delete .latest checkpoint as it is not needed anymore
+        if os.path.exists(logger.get_checkpoint_path('latest')):
+            os.remove(logger.get_checkpoint_path('latest'))
     
     if args.no_save:
         if os.path.exists(logger.get_checkpoint_path('best')):
@@ -395,6 +391,8 @@ if __name__ == '__main__':
     
     # Data Transformations
     group = parser.add_argument_group('Data Transformations')
+    group.add_argument("--dataaug", action='store_true',
+                       help="Use data augmentation for training. Values are set based on.")
     group.add_argument('--no-aug-source', action='store_true',
                         help='Do not apply augmentation to source domain data.')
     group.add_argument('--no-aug-target', action='store_true',
@@ -641,6 +639,8 @@ if __name__ == '__main__':
                        help='Do not evaluate base classes during evaluation. I.e. only evaluation on novel classes.')
     group.add_argument('--no-additional-metrics', action='store_true',
                        help="DO not create t-SNE and A-Distance at the end.")
+    group.add_argument('--domain-measure-epochs', action='store_true',
+                       help='Compute tSNE and A-Distance every epoch. Default: False')
     
     # Logging and checkpoints
     group = parser.add_argument_group('Logging and Checkpoints')
@@ -656,8 +656,12 @@ if __name__ == '__main__':
                         help='Save class summary tracking class wise metrics for each epoch.')
     group.add_argument("--create-report", action='store_true',
                         help='Save final report as a .html file.')
+    group.add_argument('--keep-unneeded-checkpoints', action='store_true',
+                        help='Keep all checkpoints. If False all except best will be deleted.')
     group.add_argument("--no-save", action='store_true',
                         help='Do not save any checkpoints/Delete all checkpoints after finishing run.')
+    group.add_argument("--save-epochs", action='store_true',
+                        help='Save model checkpoints for each epoch.')
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
     if args_config.config:

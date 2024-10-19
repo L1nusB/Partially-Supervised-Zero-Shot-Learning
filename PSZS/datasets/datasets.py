@@ -5,6 +5,7 @@ import math
 from os import PathLike
 from pathlib import Path
 import numpy as np
+from argparse import Namespace
 
 import torch
 from torch.utils.data import ConcatDataset as _ConcatDataset
@@ -19,9 +20,24 @@ from PSZS.Utils.transformations import _get_resizing_transform
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
+DATAAUG_DEFAULTS = {
+    'h_flip': 0.5,
+    'v_flip': 0.0,
+    'color_jitter_prob': 0.0,
+    'aa': 'original',
+    'reprob': 0.5,
+    'remode': 'pixel',
+    'recount': 4,
+    'resplit': False,
+    'mixup': 0.0,
+    'cutmix': 0.0,
+    'drop': 0.7,
+    'drop_path': 0.3,
+}
+
 __all__ = ['ConcatDataset', 'get_dataset_names', 'get_dataset', 
            'transform_target', 'build_remapped_descriptors', 'build_transform',
-           'build_descriptors', 'build_descriptor']
+           'build_descriptors', 'build_descriptor', 'resolve_dataaug']
 
 def flatten_nested_list(nested_list : Sequence, make_unique: bool = True) -> List:
         flattened_list = []
@@ -315,7 +331,10 @@ def transform_target(target: torch.Tensor,
         if return_np:
             return np.array(map_results)
         return torch.tensor(map_results, device=target.device)
-    
+
+def resolve_dataaug(args: Namespace) -> None:
+    for k,v in DATAAUG_DEFAULTS.items():
+        setattr(args, k, v)
 
 def build_transform(
     input_size: int|Tuple[int, int]|Tuple[int, int, int],

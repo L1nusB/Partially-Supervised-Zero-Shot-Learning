@@ -256,12 +256,35 @@ class Base_Multiple(Base_Optimizer):
     def reset_val(self):
         super().reset_val()
         self.PrecRecF1_val.reset()
+        
+    def _construct_source_pred_mask(self) -> torch.Tensor:
+        """Construct a mask to filter out the predictions of the source domain 
+        that are not shared with the target domain.
+        Filtering is done based on the dataset descriptor of the source domain.
+        If no dataset descriptor is found, the mask will retain the first self.shared_classes entries.
+
+        Returns:
+            torch.Tensor: Mask to filter predictions of the source domain.
+        """
+        source_desc = self.train_iters[0].dataset_descriptor
+        if source_desc is None:
+            warnings.warn("No dataset descriptor found for source domain. "
+                          f"Mask will retain first self.shared_classes [{len(self.shared_classes)}] entries.")
+            mask = torch.zeros(self.train_iters[0].num_classes)
+            mask[range(len(self.shared_classes))] = 1
+        else:
+            main_class_index = getattr(self.train_iters[0].dataset, 'main_class_index', -1)
+            mapping = source_desc.predIndex_to_targetId[main_class_index]
+            mask = [mapping[i] in self.shared_classes for i in range(0, source_desc.num_classes[main_class_index])]
+        return torch.tensor(mask, dtype=torch.bool, device=self.device)
     
     ######### Data Loading #########  
     # Replace _load_data function in __init__ (depending on self.send_to_device)
     def _load_data_send_to_device(self, iters: Sequence[ForeverDataIterator]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Loads the data from the iterators and sends it to the device.
         Mixup is applied if specified."""
+        # Originally use self.last_time_mark but currently this is only set here...
+        data_load_start = time.time() 
         x, labels = zip(*[next(it)[:2] for it in iters])
         x = [e.to(self.device) for e in x]
         labels = [l.to(self.device) for l in labels]
@@ -269,16 +292,18 @@ class Base_Multiple(Base_Optimizer):
         if self.do_mixup:
             x, labels = zip(*[mixup_fn(dat, lab) for dat, lab, mixup_fn in zip(x, labels, self.mixup_fns)])
         data_load_time = time.time()
-        self.data_time.update(data_load_time - self.last_time_mark)
+        self.data_time.update(data_load_time - data_load_start)
         self.last_time_mark = data_load_time
         return x, labels
     
     def _load_data_on_device(self, iters: Sequence[ForeverDataIterator]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Loads the data from the iterators. Data is assumed to be on the device already.
         I.e. usage of PrefetchLoader. Mixup is applied inside the PrefetchLoader (if specified)."""
+        # Originally use self.last_time_mark but currently this is only set here...
+        data_load_start = time.time() 
         x, labels = zip(*[next(it)[:2] for it in iters])
         data_load_time = time.time()
-        self.data_time.update(data_load_time - self.last_time_mark)
+        self.data_time.update(data_load_time - data_load_start)
         self.last_time_mark = data_load_time
         return x, labels
     

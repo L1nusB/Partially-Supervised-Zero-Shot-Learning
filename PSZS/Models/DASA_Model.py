@@ -1,6 +1,6 @@
 import copy
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 import cv2
@@ -14,7 +14,7 @@ from timm.optim import create_optimizer_v2
 from timm.layers.classifier import _create_pool
 
 from PSZS.Models.CustomModel import CustomModel, PRED_TYPE
-from PSZS.Alignment import DomainDiscriminator, DomainAdversarialLoss, WarmStartGradientReverseLayer
+from PSZS.Alignment import DomainDiscriminator, DomainAdversarialLoss, WarmStartGradientReverseLayer, BilinearDomainDiscriminator, BiLinearDomainAdversarialLoss
 
 class DASA_Model(CustomModel):
     class ClassAligner(Module):
@@ -53,6 +53,8 @@ class DASA_Model(CustomModel):
                  grl_lo: float = 0.,
                  grl_hi: float = 1.,
                  grl_max_iters: Optional[int] = None,
+                 da_type: Literal['GRL','Bilinear'] = 'GRL',
+                 bilin_mode: Literal['simple', 'domain', 'classes'] = 'simple',
                  margin: float = 1,
                  sa_weight: float = 0.2,
                  **additional_kwargs) -> None:
@@ -100,6 +102,8 @@ class DASA_Model(CustomModel):
         self.grl_max_iters = grl_max_iters 
         self.margin = margin
         self.sa_weight = sa_weight
+        self.da_type = da_type
+        self.bilin_mode = bilin_mode.lower()
         super().__init__(backbone=backbone, 
                          num_classes=num_classes,
                          num_inputs=num_inputs, 
@@ -127,6 +131,19 @@ class DASA_Model(CustomModel):
         else:
             return None
         
+    @property
+    def bilinear_da(self) -> bool:
+        return self.da_type == 'bilinear'
+        
+    @property
+    def domain_loss(self) -> BiLinearDomainAdversarialLoss | DomainAdversarialLoss:
+        # The respective losses are constructed in the _register_da_components method
+        # note that the other one does not exist
+        if self.bilinear_da:
+            return self.bilin_domain_adversarial_loss
+        else:
+            return self.domain_adversarial_loss
+        
     def _register_da_components(self, **kwargs) -> None:
         """Construct the domain adversarial loss.
         In the process the domain discriminator and gradient reversal layer are constructed
@@ -135,19 +152,59 @@ class DASA_Model(CustomModel):
         # Try to use given hidden layer as long as sufficient features are available
         # or half of the feature dimension
         self.hidden_size = self.hidden_size if self.feature_dim > self.hidden_size else int(self.feature_dim / 2)
-        domain_discriminator = DomainDiscriminator(in_feature=self.feature_dim,
-                                                   hidden_size=self.hidden_size)
         grl = WarmStartGradientReverseLayer(alpha=self.grl_alpha, 
                                             lo=self.grl_lo, 
                                             hi=self.grl_hi, 
                                             max_iters=self.grl_max_iters, 
                                             auto_step=True)
-        # No need to send to device as this is done in models.py when constructing the model
-        self.domain_adversarial_loss = DomainAdversarialLoss(domain_discriminator=domain_discriminator,
-                                                             grl=grl)
+        if self.bilinear_da:
+            print("Using bilinear domain discrimninator")
+            num_total_classes = self.classifier.largest_num_classes_test_lvl
+            num_shared_classes = self.classifier.smallest_num_classes_test_lvl
+            num_novel_classes = num_total_classes - num_shared_classes
+            if self.bilin_mode == 'simple':
+                # No need to send to device as this is done in models.py when constructing the model
+                bilin_domain_discriminator = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                        in_feature2=num_shared_classes,
+                                                                        hidden_size=self.hidden_size)
+                self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator,
+                                                                                        grl=grl, mode='simple')
+            elif self.bilin_mode == 'domain':
+                # No need to send to device as this is done in models.py when constructing the model
+                bilin_domain_discriminator_source = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                        in_feature2=num_total_classes,
+                                                                        hidden_size=self.hidden_size)
+                bilin_domain_discriminator_target = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                        in_feature2=num_shared_classes,
+                                                                        hidden_size=self.hidden_size)
+                self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator_source,
+                                                                                        domain_discriminator_o=bilin_domain_discriminator_target,
+                                                                                        grl=grl, mode='domains')
+            elif self.bilin_mode == 'classes':
+                # No need to send to device as this is done in models.py when constructing the model
+                bilin_domain_discriminator_shared = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                        in_feature2=num_shared_classes,
+                                                                        hidden_size=self.hidden_size)
+                bilin_domain_discriminator_novel = BilinearDomainDiscriminator(in_feature1=self.feature_dim,
+                                                                        in_feature2=num_novel_classes,
+                                                                        hidden_size=self.hidden_size)
+                # Mask will must be set in optimizer
+                self.bilin_domain_adversarial_loss = BiLinearDomainAdversarialLoss(domain_discriminator_s=bilin_domain_discriminator_shared,
+                                                                                        domain_discriminator_o=bilin_domain_discriminator_novel,
+                                                                                        grl=grl, mode='classes')
+            else:
+                raise ValueError(f"Unknown bilin_mode: {self.bilin_mode}")
+        else:
+            print("Using simple GRL binary domain discrimninator")
+            domain_discriminator = DomainDiscriminator(in_feature=self.feature_dim,
+                                                    hidden_size=self.hidden_size)
+            # No need to send to device as this is done in models.py when constructing the model
+            self.domain_adversarial_loss = DomainAdversarialLoss(domain_discriminator=domain_discriminator,
+                                                                grl=grl)
         self.class_aligner = self.ClassAligner(margin=self.margin)
         
     def _crop_batch(self, data: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+        img_size = data.shape[-2:]
         dtype = features.dtype
         device = features.device
         croppedBatch = []
@@ -182,7 +239,8 @@ class DASA_Model(CustomModel):
                 tmp_img = Image.fromarray(np.uint8(tmp_img))
                 tmp_bbox = (tmpx1, tmpy1, tmpx2, tmpy2)
                 tmp_bbox = tuple(tmp_bbox)
-                tmp_img = tmp_img.crop(tmp_bbox).resize((227, 227))
+                # tmp_img = tmp_img.crop(tmp_bbox).resize((227, 227))
+                tmp_img = tmp_img.crop(tmp_bbox).resize(img_size)
                 tmpiimg = np.asarray(tmp_img)
             else:
                 tmpiimg = data[batch_index].detach().cpu().numpy().transpose(1, 2, 0)
@@ -227,6 +285,7 @@ class DASA_Model(CustomModel):
     
     def val_test_state_dict(self) -> Dict[str, Any]:
         val_test_state_dict = super().val_test_state_dict()
+        val_test_state_dict.update({f'backbone2.{k}':v for k,v in self.backbone2.state_dict().items()})
         val_test_state_dict.update({f'domain_adversarial_loss.{k}':v for k,v in self.domain_adversarial_loss.state_dict().items()})
         return val_test_state_dict
     
@@ -244,7 +303,8 @@ class DASA_Model(CustomModel):
                 params.append({"params": self.feature_extractor_SA.parameters(), 'weight_decay':0})
             return params
         elif param_type=='domain':
-            return [{"params": self.domain_adversarial_loss.domain_discriminator.parameters()}]
+            # Based on property the correct domain adversarial loss object is returned
+            return [{"params": self.domain_loss.parameters()}]
         else: 
             return super().model_or_params()
     

@@ -57,6 +57,7 @@ class Base_Optimizer():
                  feature_loss_weight: Optional[float] = None,
                  logit_loss_weight: Optional[float] = None,
                  max_mixing_epochs: int | Sequence[int] = 10,
+                 save_epochs: bool = False,
                  ) -> None:
         self.train_iters = train_iters
         # Only allow a single validator object
@@ -70,6 +71,7 @@ class Base_Optimizer():
         self.iters_per_epoch = iters_per_epoch
         self.print_freq = print_freq
         self.epoch = 1
+        self.save_epochs = save_epochs
         self.batch_size = batch_size
         self.train_batch_sizes = self._get_train_batch_sizes()
         self.single_eval_class = additional_eval_group_classes is None
@@ -665,6 +667,8 @@ class Base_Optimizer():
         for epoch in range(epochs):
             lrl = [param_group['lr'] for opt in self.optimizers for param_group in opt.param_groups]
             print(f'Learning rate: {",".join([f"{i:.4e}" for i in lrl])}')
+            # Needs to be done before updating the epoch for correct epoch number in checkpoints
+            self.logger.set_epoch(self.epoch)
             # No need to pass epoch as we set it appropriately in right before
             metrics = self.process_epoch()
             save_checkpoint(model=self.model, 
@@ -672,7 +676,8 @@ class Base_Optimizer():
                             optimizer=self,
                             metric='acc1', 
                             current_best=best_acc1,
-                            save_val_test=False)
+                            save_val_test=False,
+                            guarantee=self.save_epochs)
             
             best_acc1 = max(self.eval_acc_1, best_acc1)
             filewriter.update_summary(epoch=epoch+start_epoch, 

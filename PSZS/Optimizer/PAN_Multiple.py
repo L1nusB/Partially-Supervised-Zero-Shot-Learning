@@ -67,27 +67,6 @@ class PAN_Multiple(Base_Multiple):
             if max_smoothing_epochs is None:
                 max_smoothing_epochs = self.num_epochs // 2
             setattr(self.model, 'max_smoothing_steps', self.iters_per_epoch * max_smoothing_epochs)
-        
-    def _construct_source_pred_mask(self) -> torch.Tensor:
-        """Construct a mask to filter out the predictions of the source domain 
-        that are not shared with the target domain.
-        Filtering is done based on the dataset descriptor of the source domain.
-        If no dataset descriptor is found, the mask will retain the first self.shared_classes entries.
-
-        Returns:
-            torch.Tensor: Mask to filter predictions of the source domain.
-        """
-        source_desc = self.train_iters[0].dataset_descriptor
-        if source_desc is None:
-            warnings.warn("No dataset descriptor found for source domain. "
-                          f"Mask will retain first self.shared_classes [{len(self.shared_classes)}] entries.")
-            mask = torch.zeros(self.train_iters[0].num_classes)
-            mask[range(len(self.shared_classes))] = 1
-        else:
-            main_class_index = getattr(self.train_iters[0].dataset, 'main_class_index', -1)
-            mapping = source_desc.predIndex_to_targetId[main_class_index]
-            mask = [mapping[i] in self.shared_classes for i in range(0, source_desc.num_classes[main_class_index])]
-        return torch.tensor(mask, dtype=torch.bool, device=self.device)
             
     def _expand_progress_bars(self, 
                               train_progress: ProgressMeter, 

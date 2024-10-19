@@ -56,6 +56,12 @@ class DASA_Multiple(Base_Multiple):
         assert isinstance(self.model, METHOD_MODEL_MAP['dasa']), \
             f"DASA_Multiple model must be of type {METHOD_MODEL_MAP['dasa'].__name__}"
         self.model : DASA_Model
+        if self.model.bilinear_da:
+            self.source_pred_mask = self._construct_source_pred_mask()
+            if self.model.bilin_domain_adversarial_loss.mode == 'simple' or self.model.bilin_domain_adversarial_loss.mode == 'classes':
+                # Pass the mask to Bilinear Loss when separating between shared and novel or simple mode (i.e. no separation)
+                self.model.bilin_domain_adversarial_loss.mask = self.source_pred_mask
+        
         # Dynamically set the max_iters for the GRL based on epoch count if max_iters not given explicitly otherwise.
         # If grl_epochs is not given it will default to half the number of epochs
         # Can not be done during model construction as epochs and iters are not known
@@ -63,7 +69,9 @@ class DASA_Multiple(Base_Multiple):
             if grl_epochs is None:
                 grl_epochs = self.num_epochs // 2
             # Take into account the domain update frequency
-            self.model.domain_adversarial_loss.grl.max_iters = grl_epochs * iters_per_epoch / self.domain_update_freq
+            # Domain loss propoerty returns the correct domain adversarial loss depending on da_mode
+            self.model.domain_loss.grl.max_iters = grl_epochs * iters_per_epoch / self.domain_update_freq
+            # self.model.domain_adversarial_loss.grl.max_iters = grl_epochs * iters_per_epoch / self.domain_update_freq
             
     @property
     def optimizers(self) -> List[torch.optim.Optimizer]:
@@ -98,7 +106,7 @@ class DASA_Multiple(Base_Multiple):
             train_progress.add_meter(self.meter_domain_acc, exclude_simple_reset=True)
         return train_progress, val_progress
     
-    def _compute_loss_adaptation(self, features: Sequence[torch.Tensor], 
+    def _compute_loss_adaptation(self, pred: TRAIN_PRED_TYPE, features: Sequence[torch.Tensor], 
                                  target: Tuple[torch.Tensor, torch.Tensor], **others) -> torch.Tensor:
         """Computes the domain adaptation loss for DASA.
         The domain adaptation loss consists of the binary domain discriminator as well as the class alignment loss.
@@ -110,6 +118,7 @@ class DASA_Multiple(Base_Multiple):
             but they are not needed here.
 
         Args:
+            pred (TRAIN_PRED_TYPE): Predictions of the model.
             features (Sequence[torch.Tensor]): Features to compute the DASA loss over.
             target (Tuple[torch.Tensor, torch.Tensor]): Target labels to compute the DASA loss over.
 
@@ -119,7 +128,18 @@ class DASA_Multiple(Base_Multiple):
         f_s, f_t = features
         # In case adaptation mode filters the filters only account for actual features
         f_count = sum([f_i.size(0) for f_i in features])
-        domain_transfer_loss : torch.Tensor = self.model.domain_adversarial_loss(f_s=f_s, f_t=f_t)
+        if self.model.bilinear_da:
+            p_s, p_t = pred
+            if self.model.classifier.returns_multiple_outputs:
+                p_s = p_s[self.model.classifier.test_head_pred_idx]
+                p_t = p_t[self.model.classifier.test_head_pred_idx]
+                
+            domain_transfer_loss : torch.Tensor = self.model.domain_loss(f_s=f_s, 
+                                                                        norm_logits_s=p_s.softmax(dim=1),
+                                                                        f_t=f_t,
+                                                                        norm_logits_t=p_t.softmax(dim=1))
+        else:
+            domain_transfer_loss : torch.Tensor = self.model.domain_loss(f_s=f_s, f_t=f_t)
         
         alignment_label_s, alignment_label_t = target
         if self.model.classifier.returns_multiple_outputs:

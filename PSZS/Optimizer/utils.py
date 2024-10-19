@@ -150,6 +150,7 @@ def _get_optim_multiple(method:str,
                             create_class_summary=args.create_class_summary,
                             eval_groups_names=eval_groups_names,
                             additional_eval_group_classes=additional_eval_group_classes,
+                            save_epochs=args.save_epochs,
                             **optim_params)
     return optim
 

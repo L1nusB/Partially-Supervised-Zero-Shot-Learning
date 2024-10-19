@@ -4,10 +4,11 @@
 """
 from contextlib import suppress
 from functools import partial
+import inspect
 import os.path as osp
 import os
 import psutil
-from typing import Optional, Sequence, Tuple, overload
+from typing import Callable, Optional, Sequence, Tuple, overload
 import argparse
 import ast
 import warnings
@@ -280,8 +281,13 @@ def is_other_sh_scripts_running():
 
 def tSNE_A_distance(source_loader: DataLoader, 
                     target_loader: DataLoader,
-                    model: nn.Module, device: torch.device,
-                    eval_classes: Sequence[int], out_dir: str) -> None:
+                    model: nn.Module, 
+                    device: torch.device,
+                    eval_classes: Sequence[int], 
+                    out_dir: str,
+                    suffix: Optional[str] = None,
+                    reduce: Optional[int] = 50,
+                    fullTSNE: bool = False,) -> None:
     sourceFeatures_base = []
     sourceFeatures_novel = []
     targetFeatures_base = []
@@ -318,29 +324,31 @@ def tSNE_A_distance(source_loader: DataLoader,
         sourceFeatures_novel = torch.cat(sourceFeatures_novel, dim=0)
         sourceFeatures = torch.cat([sourceFeatures_base, sourceFeatures_novel], dim=0)
 
-        tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBin.pdf'))
-        tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBinR.pdf'), reduce_dim=50)
-        # tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, 'tSNEBinRep.pdf'), reduce_dim=50, reduce_separate=True)
-        tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
-                               targetFeatures_base, targetFeatures_novel,
-                               os.path.join(out_dir, 'tSNEFour.pdf'),)
-        tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
-                               targetFeatures_base, targetFeatures_novel,
-                               os.path.join(out_dir, 'tSNEFourR.pdf'),
-                               reduce_dim=50)
-        # tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
-        #                        targetFeatures_base, targetFeatures_novel,
-        #                        os.path.join(out_dir, 'tSNEFourRSep.pdf'),
-        #                        reduce_dim=50, reduce_separate=True)
+        tSNEBinary = f'tSNEBin_{suffix}.pdf' if suffix else 'tSNEBin.pdf'
+        tSNEBinaryR = f'tSNEBinR_{suffix}.pdf' if suffix else 'tSNEBinR.pdf'
+        tSNEFour = f'tSNEFour_{suffix}.pdf' if suffix else 'tSNEFour.pdf'
+        tSNEFourR = f'tSNEFourR_{suffix}.pdf' if suffix else 'tSNEFourR.pdf'
+        
+        if fullTSNE or reduce is None or reduce <= 0:
+            tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, tSNEBinary))
+            tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
+                                targetFeatures_base, targetFeatures_novel,
+                                os.path.join(out_dir, tSNEFour),)
+        if reduce is not None and reduce > 0:    
+            tSNE_visualize_binary(sourceFeatures, targetFeatures, os.path.join(out_dir, tSNEBinaryR), reduce_dim=reduce)
+            tSNE_visualize_fourway(sourceFeatures_base, sourceFeatures_novel,
+                                targetFeatures_base, targetFeatures_novel,
+                                os.path.join(out_dir, tSNEFourR),
+                                reduce_dim=reduce)
     A_distance_base = calculateADist(sourceFeatures_base, targetFeatures_base, device, progress=False)
     A_distance_novel = calculateADist(sourceFeatures_novel, targetFeatures_novel, device, progress=False)
     A_distance_total = calculateADist(sourceFeatures, targetFeatures, device, progress=False)
     print(f'A-Distance (base): {A_distance_base}, A-Distance (novel): {A_distance_novel}, A-Distance (total): {A_distance_total}')
     
-    with open(os.path.join(out_dir, 'A-Distance.txt'), 'w') as f:
-        f.write(f'A-Distance (base): {A_distance_base} \n')
-        f.write(f'A-Distance (novel): {A_distance_novel} \n')
-        f.write(f'A-Distance (total): {A_distance_total} \n')
+    with open(os.path.join(out_dir, 'A-Distance.txt'), 'a') as f:
+        f.write(f'A-Distance {suffix if suffix else ""} (base): {A_distance_base} \n')
+        f.write(f'A-Distance {suffix if suffix else ""} (novel): {A_distance_novel} \n')
+        f.write(f'A-Distance {suffix if suffix else ""} (total): {A_distance_total} \n')
     
 
 def tSNE_visualize_binary(source_feature: torch.Tensor, target_feature: torch.Tensor,
@@ -420,38 +428,50 @@ def tSNE_visualize_fourway(source_feature_base: torch.Tensor,
             source_feature_novel = PCA(n_components=reduce_dim).fit_transform(source_feature_novel)
             target_feature_base = PCA(n_components=reduce_dim).fit_transform(target_feature_base)
             target_feature_novel = PCA(n_components=reduce_dim).fit_transform(target_feature_novel)
-            features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
-            features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
+            features = np.concatenate([source_feature_base, source_feature_novel, target_feature_base, target_feature_novel], axis=0)
         else:
-            features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
-            features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
-            features_base = PCA(n_components=reduce_dim).fit_transform(features_base)
-            features_novel = PCA(n_components=reduce_dim).fit_transform(features_novel)
+            features = np.concatenate([source_feature_base, source_feature_novel, target_feature_base, target_feature_novel], axis=0)
+            features = PCA(n_components=reduce_dim).fit_transform(features)
     else:
-        features_base = np.concatenate([source_feature_base, target_feature_base], axis=0)
-        features_novel = np.concatenate([source_feature_novel, target_feature_novel], axis=0)
+        features = np.concatenate([source_feature_base, source_feature_novel, target_feature_base, target_feature_novel], axis=0)
     
     # map features to 2-d using TSNE
-    X_tsne_base = TSNE(n_components=2, random_state=33).fit_transform(features_base)
-    X_tsne_novel = TSNE(n_components=2, random_state=33).fit_transform(features_novel)
+    X_tsne = TSNE(n_components=2, random_state=33).fit_transform(features)
 
     # domain labels, 1 represents source while 0 represents target
-    domains_base = np.concatenate((np.ones(len(source_feature_base)), np.zeros(len(target_feature_base))))
-    domains_novel = np.concatenate((np.ones(len(source_feature_novel)), np.zeros(len(target_feature_novel))))
+    labels = np.concatenate([
+        np.full(len(source_feature_base), 0),
+        np.full(len(source_feature_novel), 1),
+        np.full(len(target_feature_base), 2),
+        np.full(len(target_feature_novel), 3)
+    ])
+    
+    markers = [base_shape, novel_shape, base_shape, novel_shape]  # Circles for base, Triangles for novel
+    colors = [source_base_color, source_novel_color, target_base_color, target_novel_color]
 
     # visualize using matplotlib
     fig, ax = plt.subplots(figsize=(10, 10))
     ax: plt.Axes
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
-    ax.scatter(X_tsne_base[:, 0], X_tsne_base[:, 1], marker=base_shape, c=domains_base, cmap=col.ListedColormap([target_base_color, source_base_color]), s=20)
-    ax.scatter(X_tsne_novel[:, 0], X_tsne_novel[:, 1], marker=novel_shape, c=domains_novel, cmap=col.ListedColormap([target_novel_color, source_novel_color]), s=20)
-    # plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=domains, cmap=col.ListedColormap([target_color, source_color]), s=20)
+    # Remove spines
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    # Create scatter plots for each type
+    for i, label in enumerate(['Source Base', 'Source Novel', 'Target Base', 'Target Novel']):
+        mask = labels == i
+        # plt.scatter(X_tsne[mask, 0], X_tsne[mask, 1], 
+        #             c=[colors[i]], marker=markers[i], s=50, 
+        #             label=label)
+        plt.scatter(X_tsne[mask, 0], X_tsne[mask, 1], 
+                    c=[colors[i]], marker=markers[i], s=50, 
+                    label=label, edgecolors='white', linewidth=0.5)
+    # Add legend
+    plt.legend(title='Feature Types', loc='center left', bbox_to_anchor=(1, 0.5))
     plt.xticks([])
     plt.yticks([])
+    plt.title('TSNE Visualization of Features', fontsize=16, pad=20)
+    plt.tight_layout()
     plt.savefig(filename)
+    plt.close()
     
 class ANet(nn.Module):
     def __init__(self, in_feature):
@@ -531,3 +551,32 @@ def calculateADist(source_feature: torch.Tensor, target_feature: torch.Tensor,
             print("epoch {} accuracy: {} A-dist: {}".format(epoch, accAvg, a_distance))
 
     return a_distance.item()
+
+def filter_kwargs(func: Callable, kwargs: dict) -> dict:
+    """Filter the kwargs to only include those that are accepted by the function.
+
+    Args:
+        func (Callable): Function to check against.
+        kwargs (dict): Parameters to filter.
+
+    Returns:
+        dict: Filtered parameters.
+    """
+    # Get the parameters the function accepts
+    params = inspect.signature(func).parameters
+    
+    # Check if the function accepts arbitrary keyword arguments
+    takes_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in params.values()
+    )
+    
+    if takes_kwargs:
+        # If the function takes **kwargs, we can pass all arguments
+        return kwargs
+    else:
+        # Otherwise, filter the kwargs to only include accepted parameters
+        return {
+            k: v for k, v in kwargs.items()
+            if k in params
+        }
